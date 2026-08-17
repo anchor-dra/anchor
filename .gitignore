@@ -1,0 +1,12 @@
+.DS_Store
+.work/
+.terraform/
+.terraform.tfstate.lock.info
+crash.log
+bin/
+coverage.out
+dist/
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+*.auto.tfvars.json

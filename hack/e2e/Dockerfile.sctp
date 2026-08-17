@@ -1,0 +1,7 @@
+FROM debian:bookworm-slim
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends iproute2 lksctp-tools tcpdump && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --system --uid 65532 --no-create-home testuser
+USER 65532:65532
+CMD ["sleep", "infinity"]

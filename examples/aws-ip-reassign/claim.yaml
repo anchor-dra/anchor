@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: anchor-e2e
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: smsc-sigtran-endpoint
+  namespace: anchor-e2e
+spec:
+  devices:
+    requests:
+      - name: endpoint
+        exactly:
+          deviceClassName: carrier-endpoint.anchor.dra.example.com
+    config:
+      - requests: [endpoint]
+        opaque:
+          driver: anchor.dra.example.com
+          parameters:
+            addresses:
+              - path: path-a
+                ip: 10.40.32.10/24
+              - path: path-b
+                ip: 10.40.36.10/24

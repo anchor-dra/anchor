@@ -1,0 +1,11 @@
+vpc_id                       = "vpc-061bdf3a2f49af18d"
+kubernetes_subnet_id         = "subnet-0f33760afe3396c4c"
+carrier_subnet_a_id          = "subnet-05bb741c35281cf0b"
+carrier_subnet_b_id          = "subnet-0b2eecd192a186fb6"
+existing_worker_instance_id  = "i-0983ec5d63f718085"
+worker_ami_id                 = "ami-088d943897cc62c1b"
+worker_key_name               = "amaali-rcs"
+worker_instance_profile_name  = "rcs-staging-kubespray-worker-profile"
+worker_security_group_ids     = ["sg-0e7517069a722cfb4"]
+bastion_security_group_id     = "replace-me"
+trusted_operator_role_arn     = "arn:aws:iam::810498828727:role/replace-with-sso-role"

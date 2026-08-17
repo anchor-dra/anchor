@@ -1,0 +1,7 @@
+apiVersion: v2
+name: anchor
+description: AWS static endpoint Dynamic Resource Allocation driver
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+kubeVersion: ">=1.34.0-0"

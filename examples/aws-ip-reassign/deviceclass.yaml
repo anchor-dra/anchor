@@ -1,0 +1,28 @@
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: carrier-endpoint.anchor.dra.example.com
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "anchor.dra.example.com" &&
+          device.attributes["anchor.dra.example.com"].profile == "carrier-dual"
+  config:
+    - opaque:
+        driver: anchor.dra.example.com
+        parameters:
+          strategy: ip-reassign
+          profile: carrier-dual
+          slotsPerNode: 1
+          paths:
+            - name: path-a
+              subnetId: subnet-05bb741c35281cf0b
+              eniTagSelector:
+                carrier-endpoint: "true"
+                carrier-path: a
+            - name: path-b
+              subnetId: subnet-0b2eecd192a186fb6
+              eniTagSelector:
+                carrier-endpoint: "true"
+                carrier-path: b

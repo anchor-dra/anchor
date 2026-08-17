@@ -1,0 +1,38 @@
+image:
+  repository: anchor
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+aws:
+  region: ""
+  credentialsSecretName: ""
+  apiQPS: 2
+  apiBurst: 2
+
+controller:
+  replicas: 2
+  reconcileInterval: 2s
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+node:
+  selector:
+    anchor.dra.example.com/enabled: "true"
+  preparationTimeout: 45s
+  refreshInterval: 2s
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+nameOverride: ""
+fullnameOverride: ""

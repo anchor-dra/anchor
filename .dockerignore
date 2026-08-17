@@ -1,0 +1,10 @@
+.git
+.github
+.terraform
+.work
+bin
+charts
+docs
+examples
+hack
+terraform.tfstate*
