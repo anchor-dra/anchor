@@ -648,8 +648,12 @@ func TestReservedPodLookupIsCachedPerReconciliation(t *testing.T) {
 	cache := map[string]podLookupResult{}
 
 	for _, claim := range claims {
-		if _, err := reconciler.getReservedPod(ctx, claim, cache); err != nil {
+		_, handoff, err := reconciler.getReservedPod(ctx, claim, cache)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if handoff {
+			t.Fatal("matching reserved Pod was classified as a handoff")
 		}
 	}
 	if got := countActions(coreClient.Actions(), "get", "pods", ""); got != 1 {
@@ -657,7 +661,7 @@ func TestReservedPodLookupIsCachedPerReconciliation(t *testing.T) {
 	}
 }
 
-func TestInvalidReservedPodDoesNotReachAWS(t *testing.T) {
+func TestPodHandoffRetainsReadyPlacement(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mutate func(*corev1.Pod)
@@ -679,19 +683,36 @@ func TestInvalidReservedPodDoesNotReachAWS(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(pod)
 			}
-			placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+			status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: spec.Paths}
+			placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
 			coreObjects := []runtime.Object{claim}
 			if !tt.omit {
 				coreObjects = append(coreObjects, pod)
 			}
 			strategy := &recordingStrategy{}
-			reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(coreObjects...), Dynamic: testDynamicClient(placement, inventory), Strategy: strategy}
+			coreClient := fake.NewSimpleClientset(coreObjects...)
+			dynamicClient := testDynamicClient(placement, inventory)
+			reconciler := &PlacementReconciler{Core: coreClient, Dynamic: dynamicClient, Strategy: strategy}
 
 			if err := reconciler.Reconcile(ctx); err != nil {
 				t.Fatal(err)
 			}
 			if len(strategy.endpoints) != 0 {
-				t.Fatalf("invalid reserving Pod reached AWS strategy: %#v", strategy.endpoints)
+				t.Fatalf("Pod handoff reached AWS strategy: %#v", strategy.endpoints)
+			}
+			if got := countActions(dynamicClient.Actions(), "update", "endpointplacements", "status"); got != 0 {
+				t.Fatalf("handoff updated placement status %d times, want 0", got)
+			}
+			if got := countActions(coreClient.Actions(), "create", "events", ""); got != 0 {
+				t.Fatalf("handoff emitted %d events, want 0", got)
+			}
+			stored, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			phase, _, _ := unstructured.NestedString(stored.Object, "status", "phase")
+			if phase != model.PlacementReady {
+				t.Fatalf("handoff changed placement phase to %q", phase)
 			}
 		})
 	}
