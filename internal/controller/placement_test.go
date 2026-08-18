@@ -14,9 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 
 	anchoraws "github.com/anchor-dra/anchor/internal/aws"
 	anchorkube "github.com/anchor-dra/anchor/internal/kube"
@@ -85,13 +85,23 @@ func testOwnership(t *testing.T, address, namespace, claimName, eni string) *uns
 	}}
 }
 
-func testDynamicClient(objects ...runtime.Object) dynamic.Interface {
+func testDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	listKinds := map[schema.GroupVersionResource]string{
 		anchorkube.PlacementGVR: "EndpointPlacementList",
 		anchorkube.OwnershipGVR: "EndpointOwnershipList",
 		anchorkube.NADGVR:       "NetworkAttachmentDefinitionList",
 	}
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objects...)
+}
+
+func countActions(actions []ktesting.Action, verb, resource, subresource string) int {
+	count := 0
+	for _, action := range actions {
+		if action.GetVerb() == verb && action.GetResource().Resource == resource && action.GetSubresource() == subresource {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *partialStrategy) Validate(context.Context, anchoraws.Endpoint) error { return nil }
@@ -456,5 +466,67 @@ func TestAmbiguousLegacyOwnershipFailsWithoutGuessing(t *testing.T) {
 	}
 	if _, err := reconciler.getOwnership(ctx, address); !apierrors.IsNotFound(err) {
 		t.Fatalf("ambiguous migration created ownership: %v", err)
+	}
+}
+
+func TestFailureStatusAndEventsAreNotRepeated(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+	claim := testClaim("test", "endpoint", uid)
+	path := model.PlacementPath{Name: "a", IP: "10.0.1.90/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
+	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	placement := testPlacement(t, "test", "claim-"+string(uid), uid, spec, nil)
+	ownership := testOwnership(t, path.IP, "test", claim.Name, "eni-old")
+	dynamicClient := testDynamicClient(placement, ownership)
+	coreClient := fake.NewSimpleClientset(claim)
+	strategy := &recordingStrategy{err: errors.New("first failure")}
+	reconciler := &PlacementReconciler{Core: coreClient, Dynamic: dynamicClient, Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActions(dynamicClient.Actions(), "update", "endpointplacements", "status"); got != 1 {
+		t.Fatalf("identical failure wrote status %d times, want 1", got)
+	}
+	if got := countActions(coreClient.Actions(), "create", "events", ""); got != 1 {
+		t.Fatalf("identical failure emitted %d events, want 1", got)
+	}
+
+	strategy.err = errors.New("changed failure")
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActions(dynamicClient.Actions(), "update", "endpointplacements", "status"); got != 2 {
+		t.Fatalf("changed failure wrote status %d times, want 2", got)
+	}
+	if got := countActions(coreClient.Actions(), "create", "events", ""); got != 1 {
+		t.Fatalf("changed failure emitted %d events, want 1", got)
+	}
+
+	strategy.err = nil
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActions(dynamicClient.Actions(), "update", "endpointplacements", "status"); got != 3 {
+		t.Fatalf("recovery wrote status %d times, want 3", got)
+	}
+	if got := countActions(coreClient.Actions(), "create", "events", ""); got != 2 {
+		t.Fatalf("recovery emitted %d events, want 2", got)
+	}
+}
+
+func TestPlacementPathsAreSorted(t *testing.T) {
+	paths := placementPaths(map[string]model.PlacementPath{
+		"b": {Name: "b"},
+		"a": {Name: "a"},
+	})
+	if len(paths) != 2 || paths[0].Name != "a" || paths[1].Name != "b" {
+		t.Fatalf("paths are not sorted: %#v", paths)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -196,7 +197,9 @@ func (r *PlacementReconciler) reconcileActive(ctx context.Context, object *unstr
 	if err := r.updateStatus(ctx, object, status); err != nil {
 		return err
 	}
-	r.emit(ctx, claim.Namespace, claim.Name, claim.UID, corev1.EventTypeNormal, "EndpointPlaced", fmt.Sprintf("placed %d static endpoint paths on node %s", len(spec.Paths), spec.NodeName))
+	if oldStatus.Phase != model.PlacementReady {
+		r.emit(ctx, claim.Namespace, claim.Name, claim.UID, corev1.EventTypeNormal, "EndpointPlaced", fmt.Sprintf("placed %d static endpoint paths on node %s", len(spec.Paths), spec.NodeName))
+	}
 	return nil
 }
 
@@ -304,8 +307,11 @@ func (r *PlacementReconciler) fail(ctx context.Context, object *unstructured.Uns
 }
 
 func (r *PlacementReconciler) failWithPaths(ctx context.Context, object *unstructured.Unstructured, cause error, paths []model.PlacementPath) error {
+	previousPhase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
 	status := model.EndpointPlacementStatus{Phase: model.PlacementFailed, Message: cause.Error(), ObservedGeneration: object.GetGeneration(), Paths: paths}
-	_ = r.updateStatus(ctx, object, status)
+	if err := r.updateStatus(ctx, object, status); err != nil {
+		return cause
+	}
 	claimName := object.GetName()
 	claimUID := object.GetUID()
 	if rawSpec, found, _ := unstructured.NestedMap(object.Object, "spec"); found {
@@ -315,7 +321,9 @@ func (r *PlacementReconciler) failWithPaths(ctx context.Context, object *unstruc
 			claimUID = types.UID(spec.ClaimUID)
 		}
 	}
-	r.emit(ctx, object.GetNamespace(), claimName, claimUID, corev1.EventTypeWarning, "EndpointPlacementFailed", cause.Error())
+	if previousPhase != model.PlacementFailed {
+		r.emit(ctx, object.GetNamespace(), claimName, claimUID, corev1.EventTypeWarning, "EndpointPlacementFailed", cause.Error())
+	}
 	return cause
 }
 
@@ -323,6 +331,10 @@ func (r *PlacementReconciler) updateStatus(ctx context.Context, object *unstruct
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
 	if err != nil {
 		return err
+	}
+	current, _, _ := unstructured.NestedMap(object.Object, "status")
+	if reflect.DeepEqual(current, raw) {
+		return nil
 	}
 	copy := object.DeepCopy()
 	copy.Object["status"] = raw
@@ -386,6 +398,7 @@ func placementPaths(values map[string]model.PlacementPath) []model.PlacementPath
 	for _, path := range values {
 		paths = append(paths, path)
 	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i].Name < paths[j].Name })
 	return paths
 }
 
