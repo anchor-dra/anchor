@@ -8,7 +8,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch", "update"]

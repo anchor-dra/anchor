@@ -147,10 +147,6 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 	if err != nil {
 		return nil, nil, fmt.Errorf("list ResourceClaims: %w", err)
 	}
-	pods, err := r.Core.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("list Pods: %w", err)
-	}
 	inventories, err := r.Dynamic.Resource(anchorkube.InventoryGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("list AnchorNodeInventories: %w", err)
@@ -160,11 +156,6 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 		claim := &claims.Items[i]
 		claimsByUID[claim.Namespace+"/"+string(claim.UID)] = claim
 	}
-	podsByName := make(map[string]*corev1.Pod, len(pods.Items))
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		podsByName[pod.Namespace+"/"+pod.Name] = pod
-	}
 	inventoriesByName := make(map[string]*unstructured.Unstructured, len(inventories.Items))
 	for i := range inventories.Items {
 		inventory := &inventories.Items[i]
@@ -172,6 +163,7 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 	}
 
 	live := make([]livePlacement, 0, len(placements.Items))
+	podCache := map[string]podLookupResult{}
 	for i := range placements.Items {
 		object := &placements.Items[i]
 		requested, status, err := decodePlacement(object)
@@ -200,7 +192,12 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 		if len(claim.Status.ReservedFor) == 0 {
 			continue
 		}
-		spec, err := derivePlacement(claim, podsByName, inventoriesByName)
+		pod, err := r.getReservedPod(ctx, claim, podCache)
+		if err != nil {
+			_ = r.failForClaim(ctx, object, claim, err)
+			continue
+		}
+		spec, err := derivePlacement(claim, pod, inventoriesByName)
 		if err != nil {
 			_ = r.failForClaim(ctx, object, claim, err)
 			continue
@@ -252,7 +249,35 @@ type placementInventory struct {
 	Generation int64
 }
 
-func derivePlacement(claim *resourceapi.ResourceClaim, pods map[string]*corev1.Pod, inventories map[string]*unstructured.Unstructured) (model.EndpointPlacementSpec, error) {
+type podLookupResult struct {
+	pod *corev1.Pod
+	err error
+}
+
+func (r *PlacementReconciler) getReservedPod(ctx context.Context, claim *resourceapi.ResourceClaim, cache map[string]podLookupResult) (*corev1.Pod, error) {
+	if len(claim.Status.ReservedFor) != 1 {
+		return nil, fmt.Errorf("claim must have exactly one active Pod reservation, found %d", len(claim.Status.ReservedFor))
+	}
+	reservation := claim.Status.ReservedFor[0]
+	if reservation.APIGroup != "" || reservation.Resource != "pods" {
+		return nil, fmt.Errorf("claim reservation must reference one core Pod")
+	}
+	key := claim.Namespace + "/" + reservation.Name
+	result, found := cache[key]
+	if !found {
+		result.pod, result.err = r.Core.CoreV1().Pods(claim.Namespace).Get(ctx, reservation.Name, metav1.GetOptions{})
+		cache[key] = result
+	}
+	if result.err != nil {
+		return nil, fmt.Errorf("get reserving Pod %s: %w", key, result.err)
+	}
+	if result.pod.UID != reservation.UID {
+		return nil, fmt.Errorf("claim reservation does not match the existing Pod UID")
+	}
+	return result.pod, nil
+}
+
+func derivePlacement(claim *resourceapi.ResourceClaim, pod *corev1.Pod, inventories map[string]*unstructured.Unstructured) (model.EndpointPlacementSpec, error) {
 	var result model.EndpointPlacementSpec
 	if len(claim.Status.ReservedFor) != 1 {
 		return result, fmt.Errorf("claim must have exactly one active Pod reservation, found %d", len(claim.Status.ReservedFor))
@@ -261,8 +286,7 @@ func derivePlacement(claim *resourceapi.ResourceClaim, pods map[string]*corev1.P
 	if reservation.APIGroup != "" || reservation.Resource != "pods" {
 		return result, fmt.Errorf("claim reservation must reference one core Pod")
 	}
-	pod := pods[claim.Namespace+"/"+reservation.Name]
-	if pod == nil || pod.UID != reservation.UID {
+	if pod == nil || pod.Namespace != claim.Namespace || pod.Name != reservation.Name || pod.UID != reservation.UID {
 		return result, fmt.Errorf("claim reservation does not match an existing Pod UID")
 	}
 	if pod.DeletionTimestamp != nil {

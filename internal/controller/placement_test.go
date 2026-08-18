@@ -611,6 +611,125 @@ func TestPlacementRequiresAllocationOnReservedPodNode(t *testing.T) {
 	}
 }
 
+func TestPlacementGetsOnlyReservedPod(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("efefefef-efef-efef-efef-efefefefefef")
+	claim := testClaim("test", "endpoint", uid)
+	spec := model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign,
+		Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.73/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+	}
+	pod, inventory := authorizePlacement(t, claim, &spec)
+	unrelated := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "other", UID: "unrelated-uid"}}
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+	coreClient := fake.NewSimpleClientset(claim, pod, unrelated)
+	reconciler := &PlacementReconciler{Core: coreClient, Dynamic: testDynamicClient(placement, inventory), Strategy: &recordingStrategy{}}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := countActions(coreClient.Actions(), "list", "pods", ""); got != 0 {
+		t.Fatalf("reconciliation listed Pods %d times, want 0", got)
+	}
+	if got := countActions(coreClient.Actions(), "get", "pods", ""); got != 1 {
+		t.Fatalf("reconciliation got Pods %d times, want 1", got)
+	}
+}
+
+func TestReservedPodLookupIsCachedPerReconciliation(t *testing.T) {
+	ctx := context.Background()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "test", UID: "pod-uid"}}
+	claims := []*resourceapi.ResourceClaim{
+		{ObjectMeta: metav1.ObjectMeta{Name: "first", Namespace: "test"}, Status: resourceapi.ResourceClaimStatus{ReservedFor: []resourceapi.ResourceClaimConsumerReference{{Resource: "pods", Name: pod.Name, UID: pod.UID}}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: "test"}, Status: resourceapi.ResourceClaimStatus{ReservedFor: []resourceapi.ResourceClaimConsumerReference{{Resource: "pods", Name: pod.Name, UID: pod.UID}}}},
+	}
+	coreClient := fake.NewSimpleClientset(pod)
+	reconciler := &PlacementReconciler{Core: coreClient}
+	cache := map[string]podLookupResult{}
+
+	for _, claim := range claims {
+		if _, err := reconciler.getReservedPod(ctx, claim, cache); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := countActions(coreClient.Actions(), "get", "pods", ""); got != 1 {
+		t.Fatalf("shared reserving Pod was fetched %d times, want 1", got)
+	}
+}
+
+func TestInvalidReservedPodDoesNotReachAWS(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*corev1.Pod)
+		omit   bool
+	}{
+		{name: "missing", omit: true},
+		{name: "recreated UID", mutate: func(pod *corev1.Pod) { pod.UID = "replacement-uid" }},
+		{name: "terminating", mutate: func(pod *corev1.Pod) { now := metav1.Now(); pod.DeletionTimestamp = &now }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			uid := types.UID("f0f0f0f0-f0f0-f0f0-f0f0-" + strings.ReplaceAll(strings.ToLower(tt.name), " ", "-"))
+			claim := testClaim("test", "endpoint", uid)
+			spec := model.EndpointPlacementSpec{
+				ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign,
+				Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.74/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+			}
+			pod, inventory := authorizePlacement(t, claim, &spec)
+			if tt.mutate != nil {
+				tt.mutate(pod)
+			}
+			placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+			coreObjects := []runtime.Object{claim}
+			if !tt.omit {
+				coreObjects = append(coreObjects, pod)
+			}
+			strategy := &recordingStrategy{}
+			reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(coreObjects...), Dynamic: testDynamicClient(placement, inventory), Strategy: strategy}
+
+			if err := reconciler.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(strategy.endpoints) != 0 {
+				t.Fatalf("invalid reserving Pod reached AWS strategy: %#v", strategy.endpoints)
+			}
+		})
+	}
+}
+
+func TestMissingReservedPodDoesNotBlockOtherPlacement(t *testing.T) {
+	ctx := context.Background()
+	validClaim := testClaim("valid", "endpoint", types.UID("01010101-0101-0101-0101-010101010101"))
+	missingClaim := testClaim("missing", "endpoint", types.UID("02020202-0202-0202-0202-020202020202"))
+	validSpec := model.EndpointPlacementSpec{
+		ClaimName: validClaim.Name, ClaimUID: string(validClaim.UID), NodeName: "node-valid", Strategy: model.StrategyIPReassign,
+		Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.75/24", ENIID: "eni-valid", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+	}
+	missingSpec := model.EndpointPlacementSpec{
+		ClaimName: missingClaim.Name, ClaimUID: string(missingClaim.UID), NodeName: "node-missing", Strategy: model.StrategyIPReassign,
+		Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.76/24", ENIID: "eni-missing", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+	}
+	validPod, validInventory := authorizePlacement(t, validClaim, &validSpec)
+	_, missingInventory := authorizePlacement(t, missingClaim, &missingSpec)
+	validPlacement := testPlacement(t, validClaim.Namespace, "claim-"+string(validClaim.UID), validClaim.UID, validSpec, nil)
+	missingPlacement := testPlacement(t, missingClaim.Namespace, "claim-"+string(missingClaim.UID), missingClaim.UID, missingSpec, nil)
+	strategy := &recordingStrategy{}
+	reconciler := &PlacementReconciler{
+		Core: fake.NewSimpleClientset(validClaim, missingClaim, validPod),
+		Dynamic: testDynamicClient(
+			validPlacement, missingPlacement, validInventory, missingInventory,
+		),
+		Strategy: strategy,
+	}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 1 || strategy.endpoints[0].ClaimName != "valid/endpoint" {
+		t.Fatalf("valid placement was blocked by missing Pod: %#v", strategy.endpoints)
+	}
+}
+
 func TestNodeInventoryStatusCannotChangeAWSIdentity(t *testing.T) {
 	inventory := &placementInventory{
 		Spec:   model.AnchorNodeInventorySpec{Profiles: map[string][]model.ENIPath{"carrier": {{Name: "a", ENIID: "eni-authorized", SubnetID: "subnet-a"}}}},
