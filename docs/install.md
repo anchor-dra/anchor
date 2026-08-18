@@ -122,7 +122,9 @@ pod.
 
 The CRDs, EndpointOwnership records, and AWS placements survive
 `helm uninstall`. EndpointPlacements and NADs are ephemeral and are deleted
-with their ResourceClaims; durable ownership is not.
+with their ResourceClaims; durable ownership is not. Anchor never
+garbage-collects EndpointOwnership records: permanent retirement is an explicit
+cluster-administrator action.
 
 ## Release an endpoint permanently
 

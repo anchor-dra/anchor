@@ -6,6 +6,11 @@ metadata:
     {{- include "anchor.labels" . | nindent 4 }}
     app.kubernetes.io/component: node
 spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "anchor.name" . }}

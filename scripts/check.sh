@@ -22,6 +22,8 @@ helm template anchor charts/anchor --namespace anchor-system \
   --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/sts-regional-endpoints=true' >.work/anchor-irsa.yaml
 grep -q 'value: "true"' .work/anchor-default.yaml
 grep -q 'name: endpointownerships.dra.anchordra.co' .work/anchor-default.yaml
+grep -q 'maxUnavailable: 0' .work/anchor-default.yaml
+grep -q 'maxSurge: 1' .work/anchor-default.yaml
 grep -q 'value: "false"' .work/anchor-instance-profile.yaml
 grep -q 'node-role.kubernetes.io/control-plane' .work/anchor-instance-profile.yaml
 grep -q 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/anchor-controller' .work/anchor-irsa.yaml
