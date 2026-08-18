@@ -21,6 +21,6 @@ spec:
           parameters:
             addresses:
               - path: path-a
-                ip: 10.40.32.10/24
+                ip: 10.50.1.10/24
               - path: path-b
-                ip: 10.40.36.10/24
+                ip: 10.50.2.10/24

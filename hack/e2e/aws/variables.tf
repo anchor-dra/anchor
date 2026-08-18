@@ -10,7 +10,7 @@ variable "availability_zone" {
 
 variable "cluster_name" {
   type    = string
-  default = "rcs-staging"
+  default = "anchor-e2e"
 }
 
 variable "vpc_id" { type = string }
@@ -40,10 +40,10 @@ variable "peer_instance_type" {
 
 variable "peer_path_a_ip" {
   type    = string
-  default = "10.40.32.20"
+  default = "10.50.1.20"
 }
 
 variable "peer_path_b_ip" {
   type    = string
-  default = "10.40.36.20"
+  default = "10.50.2.20"
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 role_arn=${1:?usage: $0 <role-arn> [aws-profile] [namespace]}
-aws_profile=${2:-opsw_admin_rcs}
+aws_profile=${2:-default}
 namespace=${3:-anchor-system}
 work_dir=${ANCHOR_WORK_DIR:-.work}
 credentials_file="$work_dir/controller-credentials.env"

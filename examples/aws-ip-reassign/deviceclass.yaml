@@ -17,18 +17,18 @@ spec:
           slotsPerNode: 1
           paths:
             - name: path-a
-              subnetId: subnet-05bb741c35281cf0b
-              gateway: 10.40.32.1
+              subnetId: subnet-aaaaaaaaaaaaaaaaa
+              gateway: 10.50.1.1
               routes:
-                - 10.40.36.20/32
+                - 10.50.2.20/32
               eniTagSelector:
                 carrier-endpoint: "true"
                 carrier-path: a
             - name: path-b
-              subnetId: subnet-0b2eecd192a186fb6
-              gateway: 10.40.36.1
+              subnetId: subnet-bbbbbbbbbbbbbbbbb
+              gateway: 10.50.2.1
               routes:
-                - 10.40.32.20/32
+                - 10.50.1.20/32
               eniTagSelector:
                 carrier-endpoint: "true"
                 carrier-path: b

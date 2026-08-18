@@ -9,6 +9,9 @@
   candidate node. All ENIs for an endpoint must be in the same AZ as the node.
 - A controller IAM identity with EC2 describe permissions and tag-scoped
   `AssignPrivateIpAddresses`.
+- Security groups and subnet network ACLs that allow the endpoint protocol in
+  both directions. Cross-subnet paths require NACL allows before any broader
+  deny rule for the other carrier subnet.
 - Exclusive control of every configured static address by one active Anchor
   installation. Clusters sharing a subnet must use non-overlapping addresses.
 
@@ -16,10 +19,8 @@ Calico and Cilium do not normally manage extra ENIs. When VPC CNI is primary,
 exclude carrier ENIs from ipamd before installing Anchor. Anchor 0.1 does not
 advertise VPC-CNI compatibility as tested.
 
-Moving a cluster from Kubernetes 1.33 to 1.34 is a breaking platform upgrade.
-For the Iris platform, Kubernetes 1.33 remains on the 0.x infrastructure
-release line and Kubernetes 1.34 starts the 1.x line. Upgrade and validate the
-Kubernetes layer before installing Anchor; Anchor does not upgrade Kubernetes.
+Upgrade and validate the Kubernetes layer before installing Anchor; Anchor does
+not enable DRA feature gates or upgrade Kubernetes.
 
 ## Install
 

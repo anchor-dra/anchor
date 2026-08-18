@@ -5,18 +5,16 @@ disposable resources from `hack/e2e/aws`; it does not modify the platform
 Terraform state. Run it from a connected workstation with AWS SSO, the cluster
 API tunnel, `kubectl`, Helm, Terraform, Docker, Ansible, and `jq` available.
 
-The topology qualified on 2026-08-17 was:
+The topology requalified on 2026-08-18 was:
 
 - region/AZ: `eu-west-1` / `eu-west-1a`
-- Kubernetes subnet: `subnet-0f33760afe3396c4c`
-- path A: `subnet-05bb741c35281cf0b`, `10.40.32.0/24`
-- path B: `subnet-0b2eecd192a186fb6`, `10.40.36.0/24`
-- existing worker: `i-0983ec5d63f718085`
+- two endpoint workers, each with one pre-attached ENI per carrier path
+- two carrier subnets and one dual-homed SCTP peer in the same AZ
+- bidirectional security-group and network-ACL rules for SCTP between paths
 
-The cluster was upgraded with Kubespray v2.31.0 to Kubernetes 1.34.7, then
-Multus 4.2.2 was enabled. This Kubernetes minor upgrade is a breaking platform
-change and belongs to the `iris-infra-kubernetes` 1.x release line; its 0.x
-line remains on Kubernetes 1.33.
+The cluster was qualified on Kubernetes 1.35.4 with Multus 4.2.2. Kubernetes
+minor upgrades are breaking platform changes and must be completed and
+validated in the infrastructure layer before Anchor qualification.
 
 ## 1. Provision the disposable substrate
 
@@ -24,9 +22,11 @@ Copy `terraform.tfvars.example` to ignored `terraform.tfvars`, fill the bastion
 security group and the real IAM role ARN behind the SSO session, then run:
 
 ```bash
-AWS_PROFILE=opsw_admin_rcs terraform -chdir=hack/e2e/aws init
-AWS_PROFILE=opsw_admin_rcs terraform -chdir=hack/e2e/aws plan -out=.work/e2e.tfplan
-AWS_PROFILE=opsw_admin_rcs terraform -chdir=hack/e2e/aws apply .work/e2e.tfplan
+export AWS_PROFILE=anchor-e2e
+export KUBE_CONTEXT=anchor-e2e
+terraform -chdir=hack/e2e/aws init
+terraform -chdir=hack/e2e/aws plan -out=.work/e2e.tfplan
+terraform -chdir=hack/e2e/aws apply .work/e2e.tfplan
 ```
 
 The module creates one temporary worker, a two-interface SCTP peer, two carrier
@@ -38,20 +38,20 @@ group. Its state and plan files are ignored but must be kept until cleanup.
 Render a temporary Kubespray inventory from the existing inventory:
 
 ```bash
-worker=$(AWS_PROFILE=opsw_admin_rcs terraform -chdir=hack/e2e/aws output -json worker)
+worker=$(terraform -chdir=hack/e2e/aws output -json worker)
 worker_dns=$(jq -r .private_dns <<<"$worker")
 worker_ip=$(jq -r .private_ip <<<"$worker")
 hack/e2e/render-inventory.sh \
-  ../iris-infra-kubernetes/inventories/aws-kubespray/hosts.ini \
+  /path/to/kubespray/inventory/anchor/hosts.ini \
   .work/hosts.ini "$worker_dns" "$worker_ip"
 ```
 
 From the pinned Kubespray checkout, add only the new node:
 
 ```bash
-ansible-playbook -i ../anchor/.work/hosts.ini \
-  -e @../iris-infra-kubernetes/generated/aws-staging/kubespray-vars.yml \
-  -e kube_version=1.34.7 \
+ansible-playbook -i .work/hosts.ini \
+  -e @/path/to/kubespray/inventory/anchor/group_vars/k8s_cluster/k8s-cluster.yml \
+  -e kube_version=1.35.4 \
   -e kube_network_plugin_multus=true \
   -e multus_version=4.2.2 \
   -b scale.yml \
@@ -90,10 +90,10 @@ described in the IAM guide. Install the published chart with the controller on
 those control-plane nodes, then apply the examples:
 
 ```bash
-kubectl --context rcs-staging label node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
+kubectl --context "$KUBE_CONTEXT" label node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
   dra.anchordra.co/enabled=true
 
-helm --kube-context rcs-staging upgrade --install anchor \
+helm --kube-context "$KUBE_CONTEXT" upgrade --install anchor \
   oci://ghcr.io/anchor-dra/charts/anchor \
   --version "$ANCHOR_VERSION" \
   --namespace anchor-system --create-namespace \
@@ -104,10 +104,10 @@ helm --kube-context rcs-staging upgrade --install anchor \
   --set 'controller.tolerations[0].operator=Exists' \
   --set 'controller.tolerations[0].effect=NoSchedule'
 
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/deviceclass.yaml
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/claim.yaml
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/pod.yaml
-kubectl --context rcs-staging -n anchor-e2e wait \
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/deviceclass.yaml
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/claim.yaml
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/pod.yaml
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e wait \
   --for=condition=Ready pod/smsc-sctp --timeout=180s
 ```
 
@@ -117,10 +117,10 @@ Verify that two ResourceSlices exist, the claim is allocated and reserved, the
 EndpointPlacement is Ready, and the pod has both addresses:
 
 ```bash
-kubectl --context rcs-staging get resourceslices.resource.k8s.io
-kubectl --context rcs-staging -n anchor-e2e get resourceclaim,endpointplacement
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- ip -d address
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- ip rule
+kubectl --context "$KUBE_CONTEXT" get resourceslices.resource.k8s.io
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e get resourceclaim,endpointplacement
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- ip -d address
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- ip rule
 ```
 
 Install `lksctp-tools` from the peer's configured OS repository and start a
@@ -135,9 +135,9 @@ routing without adding more AWS resources. Verify that traffic sourced from
 path A reaches the path-B peer through `sigtran-a`, and vice versa:
 
 ```bash
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- \
   ip route get 10.40.36.20 from 10.40.32.10
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- \
   ip route get 10.40.32.20 from 10.40.36.10
 ```
 
@@ -145,9 +145,9 @@ The first result must use `sigtran-a` through `10.40.32.1`; the second must use
 `sigtran-b` through `10.40.36.1`. Prove both crossed paths separately:
 
 ```bash
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- \
   sctp_test -H 10.40.32.10 -P 2906 -C PEER_PATH_B_IP -p 2905 -s -x 1 -c 0
-kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e exec smsc-sctp -- \
   sctp_test -H 10.40.36.10 -P 2906 -C PEER_PATH_A_IP -p 2905 -s -x 1 -c 0
 ```
 
@@ -170,12 +170,12 @@ Cordon the current endpoint worker, delete and recreate only the test pod, and
 keep the standalone claim:
 
 ```bash
-kubectl --context rcs-staging cordon CURRENT_ENDPOINT_NODE
-kubectl --context rcs-staging -n anchor-e2e delete pod/smsc-sctp --wait
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/pod.yaml
-kubectl --context rcs-staging -n anchor-e2e wait \
+kubectl --context "$KUBE_CONTEXT" cordon CURRENT_ENDPOINT_NODE
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e delete pod/smsc-sctp --wait
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/pod.yaml
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e wait \
   --for=condition=Ready pod/smsc-sctp --timeout=180s
-kubectl --context rcs-staging uncordon CURRENT_ENDPOINT_NODE
+kubectl --context "$KUBE_CONTEXT" uncordon CURRENT_ENDPOINT_NODE
 ```
 
 The replacement must run on the other endpoint worker. Verify that both AWS
@@ -191,22 +191,22 @@ Capture the claim UID, delete the pod and claim, and recreate both while the
 current endpoint node is cordoned:
 
 ```bash
-old_claim_uid=$(kubectl --context rcs-staging -n anchor-e2e \
+old_claim_uid=$(kubectl --context "$KUBE_CONTEXT" -n anchor-e2e \
   get resourceclaim smsc-sigtran-endpoint -o jsonpath='{.metadata.uid}')
-current_node=$(kubectl --context rcs-staging -n anchor-e2e \
+current_node=$(kubectl --context "$KUBE_CONTEXT" -n anchor-e2e \
   get pod smsc-sctp -o jsonpath='{.spec.nodeName}')
-kubectl --context rcs-staging cordon "$current_node"
-kubectl --context rcs-staging -n anchor-e2e delete pod smsc-sctp --wait
-kubectl --context rcs-staging -n anchor-e2e delete resourceclaim \
+kubectl --context "$KUBE_CONTEXT" cordon "$current_node"
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e delete pod smsc-sctp --wait
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e delete resourceclaim \
   smsc-sigtran-endpoint --wait
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/claim.yaml
-kubectl --context rcs-staging apply -f examples/aws-ip-reassign/pod.yaml
-kubectl --context rcs-staging -n anchor-e2e wait \
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/claim.yaml
+kubectl --context "$KUBE_CONTEXT" apply -f examples/aws-ip-reassign/pod.yaml
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e wait \
   --for=condition=Ready pod/smsc-sctp --timeout=180s
-new_claim_uid=$(kubectl --context rcs-staging -n anchor-e2e \
+new_claim_uid=$(kubectl --context "$KUBE_CONTEXT" -n anchor-e2e \
   get resourceclaim smsc-sigtran-endpoint -o jsonpath='{.metadata.uid}')
 test "$old_claim_uid" != "$new_claim_uid"
-kubectl --context rcs-staging uncordon "$current_node"
+kubectl --context "$KUBE_CONTEXT" uncordon "$current_node"
 ```
 
 The old UID-named EndpointPlacement and its NADs must be gone. The replacement
@@ -215,9 +215,9 @@ cluster-scoped ownership records keep the same logical owner and update to the
 new claim UID and ENIs:
 
 ```bash
-kubectl --context rcs-staging get endpointownerships.dra.anchordra.co -o wide
-kubectl --context rcs-staging -n anchor-e2e get endpointplacements
-kubectl --context rcs-staging -n anchor-e2e get network-attachment-definitions
+kubectl --context "$KUBE_CONTEXT" get endpointownerships.dra.anchordra.co -o wide
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e get endpointplacements
+kubectl --context "$KUBE_CONTEXT" -n anchor-e2e get network-attachment-definitions
 ```
 
 Repeat once with `kubectl delete namespace anchor-e2e --wait` instead of

@@ -45,12 +45,12 @@ role and schedule `anchor-controller` only on those nodes. Set the control-plane
 IMDSv2 response hop limit to `2`, keep tokens required, and install with
 `aws.useInstanceProfile=true`.
 
-This deliberately follows the node-role model used by AWS CCM and EBS CSI in
-the Iris Kubespray platform. It is simpler than operating a self-managed OIDC
-issuer, but every pod that can access control-plane IMDS shares the role. The
-control-plane taint and tag-scoped mutation policy are therefore mandatory.
-The node plugin must not run on the control-plane role for credential purposes
-and does not call AWS APIs.
+This follows the node-role model commonly used by AWS CCM and EBS CSI on
+self-managed clusters. It is simpler than operating a self-managed OIDC issuer,
+but every pod that can access control-plane IMDS shares the role. The
+control-plane taint and tag-scoped mutation policy are therefore mandatory. The
+node plugin must not run on the control-plane role for credential purposes and
+does not call AWS APIs.
 
 ## EKS IRSA
 
