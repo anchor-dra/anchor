@@ -15,11 +15,14 @@ var (
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "anchor", Name: "reconcile_errors_total", Help: "Reconciliation errors by controller.",
 	}, []string{"controller"})
+	ReconcileDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "anchor", Name: "reconcile_duration_seconds", Help: "Reconciliation duration by controller.", Buckets: prometheus.DefBuckets,
+	}, []string{"controller"})
 	DriftDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "anchor", Name: "drift_detections_total", Help: "Ready placements found to have drifted.",
 	}, []string{"strategy"})
 )
 
 func init() {
-	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, ReconcileErrors, DriftDetections)
+	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, ReconcileErrors, ReconcileDuration, DriftDetections)
 }

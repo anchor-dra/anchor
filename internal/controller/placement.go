@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -31,27 +32,120 @@ import (
 type PlacementReconciler struct {
 	Core     kubernetes.Interface
 	Dynamic  dynamic.Interface
-	Strategy anchoraws.PlacementStrategy
+	Strategy anchoraws.BatchPlacementStrategy
 	Logger   *slog.Logger
 }
 
 type livePlacement struct {
 	object *unstructured.Unstructured
 	spec   model.EndpointPlacementSpec
+	status model.EndpointPlacementStatus
 	claim  *resourceapi.ResourceClaim
 }
 
+type placementWork struct {
+	live       *livePlacement
+	ownerships map[string]*ownershipRecord
+	endpoints  []anchoraws.Endpoint
+}
+
 func (r *PlacementReconciler) Reconcile(ctx context.Context) error {
+	live, conflicts, err := r.loadLive(ctx)
+	if err != nil {
+		return err
+	}
+	works := []*placementWork{}
+	for i := range live {
+		placement := &live[i]
+		key := placement.object.GetNamespace() + "/" + placement.object.GetName()
+		if message := conflicts[key]; message != "" {
+			_ = r.fail(ctx, placement.object, fmt.Errorf("%s", message))
+			continue
+		}
+		if placement.status.Phase == model.PlacementReady && placement.status.ObservedGeneration == placement.object.GetGeneration() {
+			continue
+		}
+		work, err := r.prepareWork(ctx, placement)
+		if err != nil {
+			_ = r.fail(ctx, placement.object, err)
+			continue
+		}
+		if work != nil {
+			works = append(works, work)
+		}
+	}
+	r.executeWorks(ctx, works)
+	return nil
+}
+
+func (r *PlacementReconciler) VerifyReady(ctx context.Context) error {
+	live, conflicts, err := r.loadLive(ctx)
+	if err != nil {
+		return err
+	}
+	type verificationTarget struct {
+		placement int
+		endpoint  anchoraws.Endpoint
+	}
+	targets := []verificationTarget{}
+	for i := range live {
+		placement := &live[i]
+		key := placement.object.GetNamespace() + "/" + placement.object.GetName()
+		if conflicts[key] != "" || placement.status.Phase != model.PlacementReady || placement.status.ObservedGeneration != placement.object.GetGeneration() || len(placement.claim.Status.ReservedFor) != 1 {
+			continue
+		}
+		for _, path := range placement.spec.Paths {
+			targets = append(targets, verificationTarget{placement: i, endpoint: anchoraws.Endpoint{
+				ClaimUID: placement.spec.ClaimUID, ClaimName: placement.object.GetNamespace() + "/" + placement.spec.ClaimName,
+				NodeName: placement.spec.NodeName, Path: path, ForceSteal: placement.spec.ForceSteal,
+			}})
+		}
+	}
+	endpoints := make([]anchoraws.Endpoint, len(targets))
+	for i := range targets {
+		endpoints[i] = targets[i].endpoint
+	}
+	results, err := r.Strategy.VerifyBatch(ctx, endpoints)
+	if err != nil {
+		return fmt.Errorf("verify Ready placements: %w", err)
+	}
+	if len(results) != len(targets) {
+		return fmt.Errorf("verify Ready placements returned %d results for %d paths", len(results), len(targets))
+	}
+	drifted := map[int]bool{}
+	for i, result := range results {
+		if result.Err != nil || !result.Placed {
+			drifted[targets[i].placement] = true
+		}
+	}
+	works := []*placementWork{}
+	for index := range drifted {
+		placement := &live[index]
+		anchormetrics.DriftDetections.WithLabelValues(placement.spec.Strategy).Inc()
+		work, err := r.prepareWork(ctx, placement)
+		if err != nil {
+			_ = r.fail(ctx, placement.object, err)
+			continue
+		}
+		if work != nil {
+			works = append(works, work)
+		}
+	}
+	r.executeWorks(ctx, works)
+	return nil
+}
+
+func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, map[string]string, error) {
 	if r.Logger == nil {
 		r.Logger = slog.Default()
 	}
 	placements, err := r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list EndpointPlacements: %w", err)
+		return nil, nil, fmt.Errorf("list EndpointPlacements: %w", err)
 	}
 	claims, err := r.Core.ResourceV1().ResourceClaims(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list ResourceClaims: %w", err)
+		return nil, nil, fmt.Errorf("list ResourceClaims: %w", err)
 	}
 	claimsByName := make(map[string]*resourceapi.ResourceClaim, len(claims.Items))
 	for i := range claims.Items {
@@ -59,13 +153,13 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context) error {
 		claimsByName[claim.Namespace+"/"+claim.Name] = claim
 	}
 	if err := r.migrateOwnerships(ctx, placements.Items); err != nil {
-		return fmt.Errorf("migrate durable ownership: %w", err)
+		return nil, nil, fmt.Errorf("migrate durable ownership: %w", err)
 	}
 
 	live := make([]livePlacement, 0, len(placements.Items))
 	for i := range placements.Items {
 		object := &placements.Items[i]
-		spec, _, err := decodePlacement(object)
+		spec, status, err := decodePlacement(object)
 		if err != nil {
 			_ = r.fail(ctx, object, err)
 			continue
@@ -81,26 +175,15 @@ func (r *PlacementReconciler) Reconcile(ctx context.Context) error {
 			r.Logger.Error("placement owner-reference repair failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
 			continue
 		}
-		live = append(live, livePlacement{object: object, spec: spec, claim: claim})
+		live = append(live, livePlacement{object: object, spec: spec, status: status, claim: claim})
 	}
 
 	ownerships, err := r.listOwnerships(ctx)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	conflicts := liveAddressConflicts(live, ownerships)
-	for i := range live {
-		placement := &live[i]
-		key := placement.object.GetNamespace() + "/" + placement.object.GetName()
-		if message := conflicts[key]; message != "" {
-			_ = r.fail(ctx, placement.object, fmt.Errorf("%s", message))
-			continue
-		}
-		if err := r.reconcileActive(ctx, placement.object, placement.claim); err != nil {
-			r.Logger.Error("placement reconciliation failed", "namespace", placement.object.GetNamespace(), "name", placement.object.GetName(), "error", err)
-		}
-	}
-	return nil
+	return live, conflicts, nil
 }
 
 func decodePlacement(object *unstructured.Unstructured) (model.EndpointPlacementSpec, model.EndpointPlacementStatus, error) {
@@ -144,63 +227,111 @@ func (r *PlacementReconciler) reconcileActive(ctx context.Context, object *unstr
 	if err != nil {
 		return r.fail(ctx, object, err)
 	}
-	alreadyReady := oldStatus.Phase == model.PlacementReady && oldStatus.ObservedGeneration == object.GetGeneration()
+	live := &livePlacement{object: object, spec: spec, status: oldStatus, claim: claim}
+	work, err := r.prepareWork(ctx, live)
+	if err != nil {
+		return r.fail(ctx, object, err)
+	}
+	if work == nil {
+		return nil
+	}
+	return r.executeWorks(ctx, []*placementWork{work})
+}
+
+func (r *PlacementReconciler) prepareWork(ctx context.Context, placement *livePlacement) (*placementWork, error) {
 	// A standalone claim is briefly unreserved while its old pod is removed and
 	// its replacement is being scheduled. Keep the last successful placement as
 	// the ownership record during that handoff; clearing it would make Anchor
 	// mistake its own ENI assignment for an external conflict.
-	if len(claim.Status.ReservedFor) == 0 {
-		return nil
+	if len(placement.claim.Status.ReservedFor) == 0 {
+		return nil, nil
 	}
-	if len(claim.Status.ReservedFor) != 1 {
-		return r.fail(ctx, object, fmt.Errorf("claim must have exactly one active pod reservation, found %d", len(claim.Status.ReservedFor)))
+	if len(placement.claim.Status.ReservedFor) != 1 {
+		return nil, fmt.Errorf("claim must have exactly one active pod reservation, found %d", len(placement.claim.Status.ReservedFor))
 	}
-	ownerships, err := r.reserveOwnerships(ctx, object.GetNamespace(), spec)
+	ownerships, err := r.reserveOwnerships(ctx, placement.object.GetNamespace(), placement.spec)
 	if err != nil {
-		return r.fail(ctx, object, err)
+		return nil, err
 	}
 	previous := map[string]string{}
-	placed := map[string]model.PlacementPath{}
-	for _, path := range oldStatus.Paths {
+	for _, path := range placement.status.Paths {
 		previous[path.Name] = path.ENIID
-		placed[path.Name] = path
 	}
-	for _, path := range spec.Paths {
+	work := &placementWork{live: placement, ownerships: ownerships, endpoints: make([]anchoraws.Endpoint, 0, len(placement.spec.Paths))}
+	for _, path := range placement.spec.Paths {
 		ip, _ := ownershipAddress(path)
 		previousENI := previous[path.Name]
 		if ownership := ownerships[ip]; ownership != nil && ownership.Status.ENIID != "" {
 			previousENI = ownership.Status.ENIID
 		}
-		endpoint := anchoraws.Endpoint{
-			ClaimUID: spec.ClaimUID, ClaimName: object.GetNamespace() + "/" + spec.ClaimName,
-			NodeName: spec.NodeName, Path: path, PreviousENI: previousENI, ForceSteal: spec.ForceSteal,
+		work.endpoints = append(work.endpoints, anchoraws.Endpoint{
+			ClaimUID: placement.spec.ClaimUID, ClaimName: placement.object.GetNamespace() + "/" + placement.spec.ClaimName,
+			NodeName: placement.spec.NodeName, Path: path, PreviousENI: previousENI, ForceSteal: placement.spec.ForceSteal,
+		})
+	}
+	return work, nil
+}
+
+func (r *PlacementReconciler) executeWorks(ctx context.Context, works []*placementWork) error {
+	if r.Logger == nil {
+		r.Logger = slog.Default()
+	}
+	endpoints := []anchoraws.Endpoint{}
+	for _, work := range works {
+		endpoints = append(endpoints, work.endpoints...)
+	}
+	results := r.Strategy.PlaceBatch(ctx, endpoints)
+	if len(results) != len(endpoints) {
+		return fmt.Errorf("placement returned %d results for %d paths", len(results), len(endpoints))
+	}
+	offset := 0
+	var reconcileErrors []error
+	for _, work := range works {
+		placed := map[string]model.PlacementPath{}
+		for _, path := range work.live.status.Paths {
+			placed[path.Name] = path
 		}
-		if err := r.Strategy.Place(ctx, endpoint); err != nil {
-			if alreadyReady {
-				anchormetrics.DriftDetections.WithLabelValues(spec.Strategy).Inc()
+		var firstErr error
+		for i, endpoint := range work.endpoints {
+			pathErr := results[offset+i]
+			ip, _ := ownershipAddress(endpoint.Path)
+			if pathErr == nil {
+				pathErr = r.markOwnershipPlaced(ctx, work.ownerships[ip], work.live.object.GetNamespace(), work.live.spec, endpoint.Path)
 			}
-			return r.failWithPaths(ctx, object, err, placementPaths(placed))
+			if pathErr == nil {
+				pathErr = r.upsertNAD(ctx, work.live.object, work.live.spec.ClaimName, work.live.spec.ClaimUID, endpoint.Path)
+			}
+			if pathErr != nil {
+				if firstErr == nil {
+					firstErr = pathErr
+				}
+				continue
+			}
+			placed[endpoint.Path.Name] = endpoint.Path
 		}
-		if err := r.markOwnershipPlaced(ctx, ownerships[ip], object.GetNamespace(), spec, path); err != nil {
-			return r.failWithPaths(ctx, object, fmt.Errorf("record ownership for %s: %w", ip, err), placementPaths(placed))
+		offset += len(work.endpoints)
+		if firstErr != nil {
+			err := r.failWithPaths(ctx, work.live.object, firstErr, placementPaths(placed))
+			r.Logger.Error("placement reconciliation failed", "namespace", work.live.object.GetNamespace(), "name", work.live.object.GetName(), "error", err)
+			reconcileErrors = append(reconcileErrors, err)
+			continue
 		}
-		placed[path.Name] = path
-		if err := r.upsertNAD(ctx, object, spec.ClaimName, spec.ClaimUID, path); err != nil {
-			return r.failWithPaths(ctx, object, err, placementPaths(placed))
+		alreadyReady := work.live.status.Phase == model.PlacementReady && work.live.status.ObservedGeneration == work.live.object.GetGeneration()
+		if alreadyReady {
+			continue
+		}
+		now := metav1.Now()
+		status := model.EndpointPlacementStatus{Phase: model.PlacementReady, Message: "all endpoint paths are placed", ObservedGeneration: work.live.object.GetGeneration(), PlacedAt: &now, Paths: work.live.spec.Paths}
+		if err := r.updateStatus(ctx, work.live.object, status); err != nil {
+			reconcileErrors = append(reconcileErrors, err)
+			continue
+		}
+		if work.live.status.Phase != model.PlacementReady {
+			claim := work.live.claim
+			r.emit(ctx, claim.Namespace, claim.Name, claim.UID, corev1.EventTypeNormal, "EndpointPlaced", fmt.Sprintf("placed %d static endpoint paths on node %s", len(work.live.spec.Paths), work.live.spec.NodeName))
 		}
 	}
-	if alreadyReady {
-		return nil
-	}
-	now := metav1.Now()
-	status := model.EndpointPlacementStatus{Phase: model.PlacementReady, Message: "all endpoint paths are placed", ObservedGeneration: object.GetGeneration(), PlacedAt: &now, Paths: spec.Paths}
-	if err := r.updateStatus(ctx, object, status); err != nil {
-		return err
-	}
-	if oldStatus.Phase != model.PlacementReady {
-		r.emit(ctx, claim.Namespace, claim.Name, claim.UID, corev1.EventTypeNormal, "EndpointPlaced", fmt.Sprintf("placed %d static endpoint paths on node %s", len(spec.Paths), spec.NodeName))
-	}
-	return nil
+	return errors.Join(reconcileErrors...)
 }
 
 type addressContender struct {

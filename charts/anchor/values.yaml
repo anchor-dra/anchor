@@ -14,6 +14,8 @@ aws:
 controller:
   replicas: 2
   reconcileInterval: 2s
+  inventoryInterval: 60s
+  driftInterval: 60s
   nodeSelector: {}
   tolerations: []
   serviceAccount:

@@ -23,6 +23,17 @@ type PlacementStrategy interface {
 	Validate(context.Context, Endpoint) error
 }
 
+type VerificationResult struct {
+	Placed bool
+	Err    error
+}
+
+type BatchPlacementStrategy interface {
+	PlacementStrategy
+	PlaceBatch(context.Context, []Endpoint) []error
+	VerifyBatch(context.Context, []Endpoint) ([]VerificationResult, error)
+}
+
 func AddressOnly(cidr string) (string, error) {
 	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil || !prefix.Addr().Is4() {

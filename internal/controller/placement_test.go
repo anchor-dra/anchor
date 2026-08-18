@@ -28,8 +28,12 @@ type partialStrategy struct {
 }
 
 type recordingStrategy struct {
-	endpoints []anchoraws.Endpoint
-	err       error
+	endpoints    []anchoraws.Endpoint
+	verified     []anchoraws.Endpoint
+	verifyCalls  int
+	err          error
+	verification []anchoraws.VerificationResult
+	verifyErr    error
 }
 
 func (s *recordingStrategy) Validate(context.Context, anchoraws.Endpoint) error { return nil }
@@ -37,6 +41,25 @@ func (s *recordingStrategy) Release(context.Context, anchoraws.Endpoint) error  
 func (s *recordingStrategy) Place(_ context.Context, endpoint anchoraws.Endpoint) error {
 	s.endpoints = append(s.endpoints, endpoint)
 	return s.err
+}
+func (s *recordingStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []error {
+	results := make([]error, len(endpoints))
+	for i := range endpoints {
+		results[i] = s.Place(ctx, endpoints[i])
+	}
+	return results
+}
+func (s *recordingStrategy) VerifyBatch(_ context.Context, endpoints []anchoraws.Endpoint) ([]anchoraws.VerificationResult, error) {
+	s.verifyCalls++
+	s.verified = append(s.verified, endpoints...)
+	if s.verification != nil || s.verifyErr != nil {
+		return s.verification, s.verifyErr
+	}
+	results := make([]anchoraws.VerificationResult, len(endpoints))
+	for i := range results {
+		results[i].Placed = true
+	}
+	return results, nil
 }
 
 func testClaim(namespace, name string, uid types.UID) *resourceapi.ResourceClaim {
@@ -112,6 +135,20 @@ func (s *partialStrategy) Place(_ context.Context, _ anchoraws.Endpoint) error {
 		return errors.New("injected second-path failure")
 	}
 	return nil
+}
+func (s *partialStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []error {
+	results := make([]error, len(endpoints))
+	for i := range endpoints {
+		results[i] = s.Place(ctx, endpoints[i])
+	}
+	return results
+}
+func (s *partialStrategy) VerifyBatch(_ context.Context, endpoints []anchoraws.Endpoint) ([]anchoraws.VerificationResult, error) {
+	results := make([]anchoraws.VerificationResult, len(endpoints))
+	for i := range results {
+		results[i].Placed = true
+	}
+	return results, nil
 }
 
 func TestPartialPlacementRetainsSuccessfulPath(t *testing.T) {
@@ -528,5 +565,55 @@ func TestPlacementPathsAreSorted(t *testing.T) {
 	})
 	if len(paths) != 2 || paths[0].Name != "a" || paths[1].Name != "b" {
 		t.Fatalf("paths are not sorted: %#v", paths)
+	}
+}
+
+func TestReadyPlacementIsOnlyCheckedByDriftReconcile(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("12121212-1212-1212-1212-121212121212")
+	claim := testClaim("test", "endpoint", uid)
+	paths := []model.PlacementPath{
+		{Name: "a", IP: "10.0.1.110/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a"},
+		{Name: "b", IP: "10.0.2.110/24", ENIID: "eni-b", Interface: "ens7", SubnetID: "subnet-b"},
+	}
+	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign, Paths: paths}
+	status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: paths}
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
+	dynamicClient := testDynamicClient(placement, testOwnership(t, paths[0].IP, claim.Namespace, claim.Name, paths[0].ENIID), testOwnership(t, paths[1].IP, claim.Namespace, claim.Name, paths[1].ENIID))
+	strategy := &recordingStrategy{}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 0 || strategy.verifyCalls != 0 {
+		t.Fatalf("normal reconcile touched Ready placement: placed=%d verified=%d", len(strategy.endpoints), strategy.verifyCalls)
+	}
+	if err := reconciler.VerifyReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strategy.verifyCalls != 1 || len(strategy.verified) != 2 || len(strategy.endpoints) != 0 {
+		t.Fatalf("unexpected drift check: calls=%d paths=%d repairs=%d", strategy.verifyCalls, len(strategy.verified), len(strategy.endpoints))
+	}
+
+	strategy.verifyErr = errors.New("injected batch failure")
+	if err := reconciler.VerifyReady(ctx); err == nil {
+		t.Fatal("expected batch verification failure")
+	}
+	stored, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase, _, _ := unstructured.NestedString(stored.Object, "status", "phase")
+	if phase != model.PlacementReady || len(strategy.endpoints) != 0 {
+		t.Fatalf("batch failure changed Ready placement: phase=%s repairs=%d", phase, len(strategy.endpoints))
+	}
+	strategy.verifyErr = nil
+	strategy.verification = []anchoraws.VerificationResult{{Placed: false}, {Placed: true}}
+	if err := reconciler.VerifyReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 2 {
+		t.Fatalf("drifted endpoint repaired %d paths, want 2", len(strategy.endpoints))
 	}
 }

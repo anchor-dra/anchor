@@ -47,7 +47,7 @@ func command(logger *slog.Logger) *cobra.Command {
 
 func controllerCommand(logger *slog.Logger) *cobra.Command {
 	var kubeconfig, region, nodeLabel, namespace, identity, metricsAddress string
-	var interval time.Duration
+	var interval, inventoryInterval, driftInterval time.Duration
 	var qps float64
 	var burst int
 	cmd := &cobra.Command{
@@ -67,7 +67,7 @@ func controllerCommand(logger *slog.Logger) *cobra.Command {
 			reconciler := &controller.Controller{
 				Inventory: &controller.InventoryReconciler{Core: clients.Core, Dynamic: clients.Dynamic, EC2: limitedEC2, NodeLabel: nodeLabel, Logger: logger},
 				Placement: &controller.PlacementReconciler{Core: clients.Core, Dynamic: clients.Dynamic, Strategy: strategy, Logger: logger},
-				Interval:  interval, Logger: logger,
+				Interval:  interval, InventoryInterval: inventoryInterval, DriftInterval: driftInterval, Logger: logger,
 			}
 			server := startMetrics(cmd.Context(), metricsAddress, logger)
 			defer server.Shutdown(context.Background()) //nolint:errcheck
@@ -97,7 +97,9 @@ func controllerCommand(logger *slog.Logger) *cobra.Command {
 	cmd.Flags().StringVar(&namespace, "namespace", constants.SystemNamespace, "leader-election namespace")
 	cmd.Flags().StringVar(&identity, "leader-election-identity", os.Getenv("POD_NAME"), "leader-election identity")
 	cmd.Flags().StringVar(&metricsAddress, "metrics-address", ":8080", "metrics and health listen address")
-	cmd.Flags().DurationVar(&interval, "reconcile-interval", 2*time.Second, "full reconciliation interval")
+	cmd.Flags().DurationVar(&interval, "reconcile-interval", 2*time.Second, "pending placement reconciliation interval")
+	cmd.Flags().DurationVar(&inventoryInterval, "inventory-interval", time.Minute, "AWS node inventory refresh interval")
+	cmd.Flags().DurationVar(&driftInterval, "drift-interval", time.Minute, "Ready endpoint verification interval")
 	cmd.Flags().Float64Var(&qps, "aws-api-qps", 2, "global EC2 API requests per second")
 	cmd.Flags().IntVar(&burst, "aws-api-burst", 2, "global EC2 API request burst")
 	_ = cmd.MarkFlagRequired("aws-region")

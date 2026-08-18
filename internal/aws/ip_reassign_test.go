@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -13,28 +14,32 @@ import (
 
 type fakeEC2 struct {
 	interfaces []ec2types.NetworkInterface
+	describes  int
 	assigns    int
 	assignErr  error
 }
 
 func (f *fakeEC2) DescribeNetworkInterfaces(_ context.Context, in *awsec2.DescribeNetworkInterfacesInput, _ ...func(*awsec2.Options)) (*awsec2.DescribeNetworkInterfacesOutput, error) {
-	if len(in.NetworkInterfaceIds) > 0 {
-		for _, iface := range f.interfaces {
-			if iface.NetworkInterfaceId != nil && *iface.NetworkInterfaceId == in.NetworkInterfaceIds[0] {
-				return &awsec2.DescribeNetworkInterfacesOutput{NetworkInterfaces: []ec2types.NetworkInterface{iface}}, nil
-			}
-		}
-		return &awsec2.DescribeNetworkInterfacesOutput{}, nil
+	f.describes++
+	requested := map[string]bool{}
+	for _, value := range in.Filters[0].Values {
+		requested[value] = true
 	}
-	ip := in.Filters[0].Values[0]
+	result := []ec2types.NetworkInterface{}
 	for _, iface := range f.interfaces {
-		for _, address := range iface.PrivateIpAddresses {
-			if address.PrivateIpAddress != nil && *address.PrivateIpAddress == ip {
-				return &awsec2.DescribeNetworkInterfacesOutput{NetworkInterfaces: []ec2types.NetworkInterface{iface}}, nil
+		matched := in.Filters[0].Name != nil && *in.Filters[0].Name == "network-interface-id" && iface.NetworkInterfaceId != nil && requested[*iface.NetworkInterfaceId]
+		if !matched {
+			for _, address := range iface.PrivateIpAddresses {
+				if address.PrivateIpAddress != nil && requested[*address.PrivateIpAddress] {
+					matched = true
+				}
 			}
 		}
+		if matched {
+			result = append(result, iface)
+		}
 	}
-	return &awsec2.DescribeNetworkInterfacesOutput{}, nil
+	return &awsec2.DescribeNetworkInterfacesOutput{NetworkInterfaces: result}, nil
 }
 
 func (f *fakeEC2) AssignPrivateIpAddresses(_ context.Context, in *awsec2.AssignPrivateIpAddressesInput, _ ...func(*awsec2.Options)) (*awsec2.AssignPrivateIpAddressesOutput, error) {
@@ -74,6 +79,51 @@ func TestPlaceNewAndIdempotent(t *testing.T) {
 	}
 	if fake.assigns != 1 {
 		t.Fatalf("expected one mutation, got %d", fake.assigns)
+	}
+}
+
+func TestPlaceBatchUsesTwoDescribeCalls(t *testing.T) {
+	fake := &fakeEC2{}
+	strategy := NewIPReassign(fake, nil)
+	endpoints := make([]Endpoint, 0, 20)
+	for i := 1; i <= 20; i++ {
+		eniID, subnetID, ip := fmt.Sprintf("eni-%d", i), fmt.Sprintf("subnet-%d", i), fmt.Sprintf("10.0.%d.10", i)
+		fake.interfaces = append(fake.interfaces, iface(eniID, subnetID))
+		endpoints = append(endpoints, Endpoint{ClaimUID: fmt.Sprintf("uid-%d", i), Path: model.PlacementPath{Name: "a", IP: ip + "/24", ENIID: eniID, SubnetID: subnetID}})
+	}
+	results := strategy.PlaceBatch(context.Background(), endpoints)
+	for _, err := range results {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fake.describes != 2 {
+		t.Fatalf("batch used %d Describe calls, want 2", fake.describes)
+	}
+	if fake.assigns != 20 {
+		t.Fatalf("batch used %d assignments, want 20", fake.assigns)
+	}
+}
+
+func TestVerifyBatchUsesOneDescribeCall(t *testing.T) {
+	fake := &fakeEC2{}
+	endpoints := make([]Endpoint, 0, 20)
+	for i := 1; i <= 20; i++ {
+		eniID, subnetID, ip := fmt.Sprintf("eni-%d", i), fmt.Sprintf("subnet-%d", i), fmt.Sprintf("10.1.%d.10", i)
+		fake.interfaces = append(fake.interfaces, iface(eniID, subnetID, ip))
+		endpoints = append(endpoints, Endpoint{Path: model.PlacementPath{IP: ip + "/24", ENIID: eniID, SubnetID: subnetID}})
+	}
+	results, err := NewIPReassign(fake, nil).VerifyBatch(context.Background(), endpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		if result.Err != nil || !result.Placed {
+			t.Fatalf("unexpected verification result: %#v", result)
+		}
+	}
+	if fake.describes != 1 {
+		t.Fatalf("verification used %d Describe calls, want 1", fake.describes)
 	}
 }
 

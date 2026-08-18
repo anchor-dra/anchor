@@ -26,6 +26,15 @@ all addresses for a multihomed endpoint schedule together. The alpha defaults
 to one endpoint slot per node; administrators may raise the value within the
 secondary-address capacity of every carrier ENI.
 
+## Reconciliation scaling
+
+Pending placements are checked every two seconds, while inventory and drift
+checks run every 60 seconds. Inventory refresh batches all enabled instance
+IDs and carrier subnet IDs. Placement batches target-ENI and current-owner
+lookups across all pending paths; Ready endpoints use one batched, read-only
+owner lookup and enter the placement path only when drift is detected. AWS
+pagination and a shared rate limiter apply to every batch.
+
 ## Failure semantics
 
 - A path failure is handled by SCTP without an EC2 mutation.

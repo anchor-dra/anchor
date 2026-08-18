@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,6 +37,9 @@ type InventoryReconciler struct {
 }
 
 func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
+	if r.Logger == nil {
+		r.Logger = slog.Default()
+	}
 	profiles, err := r.profiles(ctx)
 	if err != nil {
 		return err
@@ -44,7 +48,8 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list enabled nodes: %w", err)
 	}
-	var nodeErrors []error
+	nodesByInstance := map[string]*coreNode{}
+	instanceIDs := make([]string, 0, len(nodes.Items))
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 		instanceID := instanceID(node.Spec.ProviderID)
@@ -52,11 +57,36 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
 			r.Logger.Warn("enabled node has no AWS provider ID", "node", node.Name)
 			continue
 		}
-		if err := r.reconcileNode(ctx, node.Name, instanceID, node.Labels["topology.kubernetes.io/zone"], profiles); err != nil {
-			nodeErrors = append(nodeErrors, fmt.Errorf("reconcile inventory for node %s: %w", node.Name, err))
+		nodesByInstance[instanceID] = &coreNode{name: node.Name, az: node.Labels["topology.kubernetes.io/zone"]}
+		instanceIDs = append(instanceIDs, instanceID)
+	}
+	interfaces, err := r.describeInterfaces(ctx, instanceIDs)
+	if err != nil {
+		return fmt.Errorf("describe attached ENIs: %w", err)
+	}
+	subnetCIDRs, err := r.describeSubnets(ctx, profileSubnetIDs(profiles))
+	if err != nil {
+		return fmt.Errorf("describe carrier subnets: %w", err)
+	}
+	interfacesByInstance := map[string][]ec2types.NetworkInterface{}
+	for _, iface := range interfaces {
+		if iface.Attachment != nil && iface.Attachment.InstanceId != nil {
+			interfacesByInstance[*iface.Attachment.InstanceId] = append(interfacesByInstance[*iface.Attachment.InstanceId], iface)
+		}
+	}
+	var nodeErrors []error
+	for instanceID, node := range nodesByInstance {
+		inventory := r.inventoryForNode(node.name, instanceID, node.az, interfacesByInstance[instanceID], subnetCIDRs, profiles)
+		if err := r.upsertInventory(ctx, inventory); err != nil {
+			nodeErrors = append(nodeErrors, fmt.Errorf("reconcile inventory for node %s: %w", node.name, err))
 		}
 	}
 	return errors.Join(nodeErrors...)
+}
+
+type coreNode struct {
+	name string
+	az   string
 }
 
 func (r *InventoryReconciler) profiles(ctx context.Context) (map[string]model.DeviceClassParameters, error) {
@@ -87,36 +117,7 @@ func (r *InventoryReconciler) profiles(ctx context.Context) (map[string]model.De
 	return profiles, nil
 }
 
-func (r *InventoryReconciler) reconcileNode(ctx context.Context, nodeName, instanceID, az string, profiles map[string]model.DeviceClassParameters) error {
-	interfaces, err := r.EC2.DescribeNetworkInterfaces(ctx, &awsec2.DescribeNetworkInterfacesInput{
-		Filters: []ec2types.Filter{{Name: stringptr("attachment.instance-id"), Values: []string{instanceID}}},
-	})
-	if err != nil {
-		return fmt.Errorf("describe attached ENIs: %w", err)
-	}
-	subnetIDs := []string{}
-	seenSubnets := map[string]bool{}
-	for _, profile := range profiles {
-		for _, path := range profile.Paths {
-			if !seenSubnets[path.SubnetID] {
-				seenSubnets[path.SubnetID] = true
-				subnetIDs = append(subnetIDs, path.SubnetID)
-			}
-		}
-	}
-	subnetCIDRs := map[string]string{}
-	if len(subnetIDs) > 0 {
-		subnets, err := r.EC2.DescribeSubnets(ctx, &awsec2.DescribeSubnetsInput{SubnetIds: subnetIDs})
-		if err != nil {
-			return fmt.Errorf("describe carrier subnets: %w", err)
-		}
-		for _, subnet := range subnets.Subnets {
-			if subnet.SubnetId != nil && subnet.CidrBlock != nil {
-				subnetCIDRs[*subnet.SubnetId] = *subnet.CidrBlock
-			}
-		}
-	}
-
+func (r *InventoryReconciler) inventoryForNode(nodeName, instanceID, az string, interfaces []ec2types.NetworkInterface, subnetCIDRs map[string]string, profiles map[string]model.DeviceClassParameters) model.AnchorNodeInventorySpec {
 	inventory := model.AnchorNodeInventorySpec{
 		NodeName: nodeName, InstanceID: instanceID, AZ: az,
 		Profiles: map[string][]model.ENIPath{}, SlotsPerNode: map[string]int{},
@@ -125,7 +126,7 @@ func (r *InventoryReconciler) reconcileNode(ctx context.Context, nodeName, insta
 		paths := make([]model.ENIPath, 0, len(profile.Paths))
 		complete := true
 		for _, path := range profile.Paths {
-			matches := matchingENIs(interfaces.NetworkInterfaces, path)
+			matches := matchingENIs(interfaces, path)
 			if len(matches) != 1 {
 				r.Logger.Warn("carrier path is not uniquely satisfied", "node", nodeName, "profile", name, "path", path.Name, "matches", len(matches))
 				complete = false
@@ -143,7 +144,77 @@ func (r *InventoryReconciler) reconcileNode(ctx context.Context, nodeName, insta
 			inventory.SlotsPerNode[name] = profile.SlotsPerNode
 		}
 	}
-	return r.upsertInventory(ctx, inventory)
+	return inventory
+}
+
+func (r *InventoryReconciler) describeInterfaces(ctx context.Context, instanceIDs []string) ([]ec2types.NetworkInterface, error) {
+	result := []ec2types.NetworkInterface{}
+	for _, values := range chunks(uniqueStrings(instanceIDs), 200) {
+		paginator := awsec2.NewDescribeNetworkInterfacesPaginator(r.EC2, &awsec2.DescribeNetworkInterfacesInput{
+			Filters:    []ec2types.Filter{{Name: awssdk.String("attachment.instance-id"), Values: values}},
+			MaxResults: awssdk.Int32(1000),
+		})
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, page.NetworkInterfaces...)
+		}
+	}
+	return result, nil
+}
+
+func (r *InventoryReconciler) describeSubnets(ctx context.Context, subnetIDs []string) (map[string]string, error) {
+	result := map[string]string{}
+	for _, values := range chunks(uniqueStrings(subnetIDs), 200) {
+		paginator := awsec2.NewDescribeSubnetsPaginator(r.EC2, &awsec2.DescribeSubnetsInput{
+			Filters:    []ec2types.Filter{{Name: awssdk.String("subnet-id"), Values: values}},
+			MaxResults: awssdk.Int32(1000),
+		})
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, subnet := range page.Subnets {
+				if subnet.SubnetId != nil && subnet.CidrBlock != nil {
+					result[*subnet.SubnetId] = *subnet.CidrBlock
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func profileSubnetIDs(profiles map[string]model.DeviceClassParameters) []string {
+	result := []string{}
+	for _, profile := range profiles {
+		for _, path := range profile.Paths {
+			result = append(result, path.SubnetID)
+		}
+	}
+	return result
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func chunks(values []string, size int) [][]string {
+	result := [][]string{}
+	for start := 0; start < len(values); start += size {
+		result = append(result, values[start:min(start+size, len(values))])
+	}
+	return result
 }
 
 func (r *InventoryReconciler) upsertInventory(ctx context.Context, spec model.AnchorNodeInventorySpec) error {

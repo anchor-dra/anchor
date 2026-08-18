@@ -47,6 +47,8 @@ spec:
             - --aws-api-qps={{ .Values.aws.apiQPS }}
             - --aws-api-burst={{ .Values.aws.apiBurst }}
             - --reconcile-interval={{ .Values.controller.reconcileInterval }}
+            - --inventory-interval={{ .Values.controller.inventoryInterval }}
+            - --drift-interval={{ .Values.controller.driftInterval }}
           env:
             - name: POD_NAME
               valueFrom:

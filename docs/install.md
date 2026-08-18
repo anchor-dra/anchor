@@ -72,6 +72,11 @@ with `aws.useInstanceProfile=true`.
 `aws.apiQPS` and `aws.apiBurst` define one shared limit across all controller
 EC2 discovery and mutation calls. Keep the conservative defaults unless the
 account owner has assigned a specific API budget to Anchor.
+`controller.reconcileInterval` controls pending-placement retries;
+`controller.inventoryInterval` and `controller.driftInterval` default to 60
+seconds so Ready endpoints do not consume the EC2 budget every retry tick.
+Monitor `anchor_reconcile_duration_seconds` by its `placement`, `inventory`,
+and `drift` labels when validating cluster capacity.
 
 Label only nodes whose carrier substrate is intentionally managed:
 
