@@ -5,6 +5,7 @@ image:
 
 aws:
   region: ""
+  useInstanceProfile: false
   credentialsSecretName: ""
   apiQPS: 2
   apiBurst: 2
@@ -13,6 +14,9 @@ controller:
   replicas: 2
   reconcileInterval: 2s
   nodeSelector: {}
+  tolerations: []
+  serviceAccount:
+    annotations: {}
   resources:
     requests:
       cpu: 50m

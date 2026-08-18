@@ -1,3 +1,6 @@
+{{- if and .Values.aws.useInstanceProfile .Values.aws.credentialsSecretName }}
+{{- fail "aws.useInstanceProfile and aws.credentialsSecretName are mutually exclusive" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +27,10 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -46,7 +53,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: AWS_EC2_METADATA_DISABLED
-              value: "true"
+              value: {{ ternary "false" "true" .Values.aws.useInstanceProfile | quote }}
           {{- with .Values.aws.credentialsSecretName }}
           envFrom:
             - secretRef:

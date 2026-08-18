@@ -21,19 +21,56 @@ Kubernetes layer before installing Anchor; Anchor does not upgrade Kubernetes.
 
 ## Install
 
-Create the controller credential Secret using the deployment platform's normal
-OIDC mechanism, or for the staging proof use `hack/e2e/assume-role-secret.sh`.
-Then install the chart:
+Choose one controller credential source. See [the IAM guide](iam.md) for the
+required policy and complete Kubespray and EKS examples.
+
+### Kubespray on EC2
+
+Attach the tag-scoped policy to the control-plane instance profile and keep the
+controller on control-plane nodes:
 
 ```bash
 helm upgrade --install anchor charts/anchor \
   --namespace anchor-system --create-namespace \
   --set aws.region=eu-west-1 \
-  --set aws.credentialsSecretName=anchor-aws-credentials \
+  --set aws.useInstanceProfile=true \
+  --set 'controller.nodeSelector.node-role\.kubernetes\.io/control-plane=' \
+  --set 'controller.tolerations[0].key=node-role.kubernetes.io/control-plane' \
+  --set 'controller.tolerations[0].operator=Exists' \
+  --set 'controller.tolerations[0].effect=NoSchedule' \
   --set image.repository=anchor \
   --set image.tag=0.1.0 \
   --set image.pullPolicy=IfNotPresent
 ```
+
+The control-plane instances must expose IMDSv2 to pod networking with response
+hop limit `2`. This mode shares the node identity, so do not schedule tenant
+workloads on those nodes.
+
+### EKS with IRSA
+
+Create the IAM OIDC provider and role described in the IAM guide, then annotate
+only the controller service account:
+
+```bash
+helm upgrade --install anchor charts/anchor \
+  --namespace anchor-system --create-namespace \
+  --set aws.region=eu-west-1 \
+  --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::ACCOUNT_ID:role/anchor-controller' \
+  --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/sts-regional-endpoints=true' \
+  --set image.repository=REGISTRY/anchor \
+  --set image.tag=0.1.0
+```
+
+Leave `aws.useInstanceProfile=false` and `aws.credentialsSecretName` empty for
+IRSA. EKS injects the projected web-identity token from the annotation.
+
+### Temporary test credentials
+
+For a disposable e2e environment only, create `anchor-aws-credentials` with
+`hack/e2e/assume-role-secret.sh` and set
+`aws.credentialsSecretName=anchor-aws-credentials`. Never combine the Secret
+with `aws.useInstanceProfile=true`.
 
 `aws.apiQPS` and `aws.apiBurst` define one shared limit across all controller
 EC2 discovery and mutation calls. Keep the conservative defaults unless the
@@ -64,7 +101,8 @@ perform explicit cleanup before removing ENIs.
 
 ## Security boundary
 
-The controller runs non-root with no Linux capabilities and disables IMDS
-credential fallback. The node plugin receives no AWS Secret. It runs in the
-host network namespace with only `NET_ADMIN`, which is needed to make hot-
-attached parent links usable, and has `allowPrivilegeEscalation: false`.
+The controller runs non-root with no Linux capabilities. IMDS is disabled by
+default and enabled only by the explicit Kubespray instance-profile setting.
+The node plugin receives no AWS Secret or IRSA annotation. It runs in the host
+network namespace with only `NET_ADMIN`, which is needed to make hot-attached
+parent links usable, and has `allowPrivilegeEscalation: false`.
