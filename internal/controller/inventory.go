@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -43,6 +44,7 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list enabled nodes: %w", err)
 	}
+	var nodeErrors []error
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 		instanceID := instanceID(node.Spec.ProviderID)
@@ -51,10 +53,10 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if err := r.reconcileNode(ctx, node.Name, instanceID, node.Labels["topology.kubernetes.io/zone"], profiles); err != nil {
-			return fmt.Errorf("reconcile inventory for node %s: %w", node.Name, err)
+			nodeErrors = append(nodeErrors, fmt.Errorf("reconcile inventory for node %s: %w", node.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(nodeErrors...)
 }
 
 func (r *InventoryReconciler) profiles(ctx context.Context) (map[string]model.DeviceClassParameters, error) {

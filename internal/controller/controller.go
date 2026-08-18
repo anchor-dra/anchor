@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -41,13 +42,14 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	if c.Inventory == nil || c.Placement == nil {
 		return fmt.Errorf("inventory and placement reconcilers are required")
 	}
+	var inventoryErr, placementErr error
 	if err := c.Inventory.Reconcile(ctx); err != nil {
 		anchormetrics.ReconcileErrors.WithLabelValues("inventory").Inc()
-		return err
+		inventoryErr = err
 	}
 	if err := c.Placement.Reconcile(ctx); err != nil {
 		anchormetrics.ReconcileErrors.WithLabelValues("placement").Inc()
-		return err
+		placementErr = err
 	}
-	return nil
+	return errors.Join(inventoryErr, placementErr)
 }
