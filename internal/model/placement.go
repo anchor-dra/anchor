@@ -57,6 +57,23 @@ type EndpointPlacementStatus struct {
 	Paths              []PlacementPath `json:"paths,omitempty"`
 }
 
+// EndpointOwnership is the durable identity of one static address. Unlike an
+// EndpointPlacement, it is cluster-scoped and intentionally outlives both a
+// ResourceClaim incarnation and its namespace.
+type EndpointOwnershipSpec struct {
+	Address        string `json:"address"`
+	ClaimNamespace string `json:"claimNamespace"`
+	ClaimName      string `json:"claimName"`
+}
+
+type EndpointOwnershipStatus struct {
+	ClaimUID     string       `json:"claimUID,omitempty"`
+	PathName     string       `json:"pathName,omitempty"`
+	ENIID        string       `json:"eniId,omitempty"`
+	NodeName     string       `json:"nodeName,omitempty"`
+	LastPlacedAt *metav1.Time `json:"lastPlacedAt,omitempty"`
+}
+
 const (
 	PlacementPending = "Pending"
 	PlacementReady   = "Ready"

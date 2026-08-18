@@ -11,6 +11,7 @@ ResourceClaim -> scheduler -> ResourceSlice endpoint slot -> target node
                                                         |
 kubelet -> anchor node -> EndpointPlacement -> anchor controller -> EC2
                                                         |
+                                                        +-> EndpointOwnership
                                                         +-> claim-specific NADs
                                                         +-> AssignPrivateIpAddresses
 ```
@@ -30,13 +31,22 @@ secondary-address capacity of every carrier ENI.
 - A path failure is handled by SCTP without an EC2 mutation.
 - A pod move calls `AssignPrivateIpAddresses` once per path with
   `AllowReassignment=true`.
-- A temporarily unreserved standalone claim retains its last successful
-  placement as the ownership record while the replacement pod is scheduled.
+- `EndpointPlacement` is execution state for one ResourceClaim UID and is
+  garbage-collected with that claim. Its NADs are garbage-collected with the
+  placement.
+- Cluster-scoped `EndpointOwnership` records retain the logical
+  namespace/name owner and last ENI for each IP. They survive claim and
+  namespace recreation.
+- A recreated claim with the same namespace/name reuses the recorded ENI as
+  trusted previous ownership and does not require `force-steal`.
 - A prepare succeeds only after every path is placed and its NAD is ready.
 - Successful paths are retained across partial retries.
 - Unprepare is deliberately non-destructive; the next placement moves the IP.
 - Unknown address owners are never overwritten without the explicit
   `dra.anchordra.co/force-steal: "true"` claim annotation.
+- A different logical claim cannot take an established address unless
+  `force-steal` is explicit and the AWS reassignment succeeds. Failed mutations
+  never transfer the durable ownership record.
 
 The alpha implements IPv4 and `ip-reassign` within one AZ. Route repointing,
 pool allocation, IPv6, cross-AZ mobility, and ENI lifecycle management are not

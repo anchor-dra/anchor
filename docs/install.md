@@ -98,13 +98,44 @@ claim. One claim is one logical endpoint and may have at most one active pod.
    `--version TARGET_VERSION`. The chart selects the matching immutable image
    tag through its `appVersion`.
 3. Wait for both controller replicas and the node DaemonSet rollout.
-4. Confirm existing EndpointPlacements remain `Ready` and ResourceSlices still
-   advertise the expected slots.
+4. Confirm existing EndpointPlacements remain `Ready`, EndpointOwnership
+   records contain the expected ENIs, and ResourceSlices still advertise the
+   expected slots.
 5. Restart endpoint workloads only after that validation.
 
-The CRDs and AWS placements survive `helm uninstall`. Uninstalling the chart
-does not unassign carrier addresses. Inspect `EndpointPlacement` objects and
-perform explicit cleanup before removing ENIs.
+The CRDs, EndpointOwnership records, and AWS placements survive
+`helm uninstall`. EndpointPlacements and NADs are ephemeral and are deleted
+with their ResourceClaims; durable ownership is not.
+
+## Release an endpoint permanently
+
+Deleting a pod, claim, or namespace does not relinquish a carrier endpoint.
+This is what allows GitOps prune/apply and namespace recreation to retain the
+same static addresses. To release an endpoint intentionally:
+
+1. Delete its workload and ResourceClaim and wait for their EndpointPlacement
+   and NADs to disappear.
+2. Record the address and `status.eniId`, and verify no live claim still uses
+   the ownership:
+
+   ```bash
+   kubectl get endpointownerships.dra.anchordra.co
+   kubectl get endpointownerships.dra.anchordra.co OWNERSHIP_NAME -o yaml
+   ```
+
+3. Delete the ownership record as a cluster administrator:
+
+   ```bash
+   kubectl delete endpointownerships.dra.anchordra.co OWNERSHIP_NAME
+   ```
+
+4. If the address must return to the subnet, unassign it explicitly from the
+   recorded ENI. Anchor deliberately does not do this during claim deletion or
+   Helm uninstall.
+
+If a live claim still exists, the controller recreates its missing ownership
+record. A later claim with a different namespace/name cannot take an address
+that still has an ownership record without `force-steal`.
 
 ## Security boundary
 

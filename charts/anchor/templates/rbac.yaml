@@ -17,13 +17,19 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["dra.anchordra.co"]
     resources: ["anchornodeinventories", "endpointplacements"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["dra.anchordra.co"]
     resources: ["endpointplacements/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["dra.anchordra.co"]
+    resources: ["endpointownerships"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["dra.anchordra.co"]
+    resources: ["endpointownerships/status"]
+    verbs: ["get", "update", "patch"]
   - apiGroups: ["k8s.cni.cncf.io"]
     resources: ["network-attachment-definitions"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

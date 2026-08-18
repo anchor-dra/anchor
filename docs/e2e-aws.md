@@ -164,13 +164,55 @@ association. On 2026-08-17, pod recreation through Ready took 7.73 seconds
 with the default two-request-per-second global EC2 budget, excluding Kubernetes
 node-failure detection.
 
+## 6. Verify claim and namespace recreation
+
+Capture the claim UID, delete the pod and claim, and recreate both while the
+current endpoint node is cordoned:
+
+```bash
+old_claim_uid=$(kubectl --context rcs-staging -n anchor-e2e \
+  get resourceclaim smsc-sigtran-endpoint -o jsonpath='{.metadata.uid}')
+current_node=$(kubectl --context rcs-staging -n anchor-e2e \
+  get pod smsc-sctp -o jsonpath='{.spec.nodeName}')
+kubectl --context rcs-staging cordon "$current_node"
+kubectl --context rcs-staging -n anchor-e2e delete pod smsc-sctp --wait
+kubectl --context rcs-staging -n anchor-e2e delete resourceclaim \
+  smsc-sigtran-endpoint --wait
+kubectl --context rcs-staging apply -f examples/aws-ip-reassign/claim.yaml
+kubectl --context rcs-staging apply -f examples/aws-ip-reassign/pod.yaml
+kubectl --context rcs-staging -n anchor-e2e wait \
+  --for=condition=Ready pod/smsc-sctp --timeout=180s
+new_claim_uid=$(kubectl --context rcs-staging -n anchor-e2e \
+  get resourceclaim smsc-sigtran-endpoint -o jsonpath='{.metadata.uid}')
+test "$old_claim_uid" != "$new_claim_uid"
+kubectl --context rcs-staging uncordon "$current_node"
+```
+
+The old UID-named EndpointPlacement and its NADs must be gone. The replacement
+must become Ready on the other worker without `force-steal`, while the two
+cluster-scoped ownership records keep the same logical owner and update to the
+new claim UID and ENIs:
+
+```bash
+kubectl --context rcs-staging get endpointownerships.dra.anchordra.co -o wide
+kubectl --context rcs-staging -n anchor-e2e get endpointplacements
+kubectl --context rcs-staging -n anchor-e2e get network-attachment-definitions
+```
+
+Repeat once with `kubectl delete namespace anchor-e2e --wait` instead of
+deleting only the claim. Reapply `claim.yaml` and `pod.yaml`, and verify the new
+namespace and claim incarnation reclaim the same two addresses without force.
+The EndpointOwnership objects must remain present throughout namespace
+termination.
+
 ## Evidence and cleanup
 
 Record the following evidence under ignored `.work/evidence/`:
 
 - node and system pod health before and after the Kubernetes upgrade
 - ResourceClaim allocation and ResourceSlices
-- EndpointPlacement state and Kubernetes events
+- EndpointPlacement, EndpointOwnership, owner-reference, and Kubernetes event
+  state before and after claim and namespace recreation
 - `ip -d address` and policy routes inside the pod
 - EC2 private-IP ownership before and after rescheduling
 - SCTP association and remote-path state proving both pod addresses are bound

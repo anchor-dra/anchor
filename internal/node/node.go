@@ -154,7 +154,7 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
 		Strategy: class.Strategy, ForceSteal: force, Paths: placementPaths,
 	}
-	generation, err := p.upsertPlacement(ctx, claim.Namespace, "claim-"+string(claim.UID), spec)
+	generation, err := p.upsertPlacement(ctx, claim, "claim-"+string(claim.UID), spec)
 	if err != nil {
 		return kubeletplugin.PrepareResult{Err: err}
 	}
@@ -210,19 +210,28 @@ func allocationForDriver(claim *resourceapi.ResourceClaim) (*resourceapi.DeviceR
 	return result, nil
 }
 
-func (p *Plugin) upsertPlacement(ctx context.Context, namespace, name string, spec model.EndpointPlacementSpec) (int64, error) {
+func (p *Plugin) upsertPlacement(ctx context.Context, claim *resourceapi.ResourceClaim, name string, spec model.EndpointPlacementSpec) (int64, error) {
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&spec)
 	if err != nil {
 		return 0, err
 	}
+	namespace := claim.Namespace
 	resource := p.dynamic.Resource(anchorkube.PlacementGVR).Namespace(namespace)
+	controller := true
+	ownerReferences := []metav1.OwnerReference{{
+		APIVersion: "resource.k8s.io/v1", Kind: "ResourceClaim", Name: claim.Name,
+		UID: claim.UID, Controller: &controller,
+	}}
+	labels := map[string]string{constants.DriverName + "/claim-uid": spec.ClaimUID}
 	current, err := resource.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		old, _, _ := unstructured.NestedMap(current.Object, "spec")
-		if reflect.DeepEqual(old, raw) {
+		if reflect.DeepEqual(old, raw) && reflect.DeepEqual(current.GetLabels(), labels) && reflect.DeepEqual(current.GetOwnerReferences(), ownerReferences) {
 			return current.GetGeneration(), nil
 		}
 		current.Object["spec"] = raw
+		current.SetLabels(labels)
+		current.SetOwnerReferences(ownerReferences)
 		updated, err := resource.Update(ctx, current, metav1.UpdateOptions{})
 		if err != nil {
 			return 0, err
@@ -234,6 +243,7 @@ func (p *Plugin) upsertPlacement(ctx context.Context, namespace, name string, sp
 		"metadata": map[string]any{"name": name, "namespace": namespace, "labels": map[string]any{constants.DriverName + "/claim-uid": spec.ClaimUID}},
 		"spec":     raw,
 	}}
+	object.SetOwnerReferences(ownerReferences)
 	created, err := resource.Create(ctx, object, metav1.CreateOptions{})
 	if err != nil {
 		return 0, err

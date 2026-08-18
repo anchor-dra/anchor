@@ -11,6 +11,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,46 +34,116 @@ type PlacementReconciler struct {
 	Logger   *slog.Logger
 }
 
+type livePlacement struct {
+	object *unstructured.Unstructured
+	spec   model.EndpointPlacementSpec
+	claim  *resourceapi.ResourceClaim
+}
+
 func (r *PlacementReconciler) Reconcile(ctx context.Context) error {
+	if r.Logger == nil {
+		r.Logger = slog.Default()
+	}
 	placements, err := r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list EndpointPlacements: %w", err)
 	}
-	conflicts := duplicateAddresses(placements.Items)
+	claims, err := r.Core.ResourceV1().ResourceClaims(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list ResourceClaims: %w", err)
+	}
+	claimsByName := make(map[string]*resourceapi.ResourceClaim, len(claims.Items))
+	for i := range claims.Items {
+		claim := &claims.Items[i]
+		claimsByName[claim.Namespace+"/"+claim.Name] = claim
+	}
+	if err := r.migrateOwnerships(ctx, placements.Items); err != nil {
+		return fmt.Errorf("migrate durable ownership: %w", err)
+	}
+
+	live := make([]livePlacement, 0, len(placements.Items))
 	for i := range placements.Items {
-		key := placements.Items[i].GetNamespace() + "/" + placements.Items[i].GetName()
-		if address := conflicts[key]; address != "" {
-			_ = r.fail(ctx, &placements.Items[i], fmt.Errorf("address %s is declared by more than one EndpointPlacement", address))
+		object := &placements.Items[i]
+		spec, _, err := decodePlacement(object)
+		if err != nil {
+			_ = r.fail(ctx, object, err)
 			continue
 		}
-		if err := r.reconcileOne(ctx, &placements.Items[i]); err != nil {
-			r.Logger.Error("placement reconciliation failed", "namespace", placements.Items[i].GetNamespace(), "name", placements.Items[i].GetName(), "error", err)
+		claim := claimsByName[object.GetNamespace()+"/"+spec.ClaimName]
+		if claim == nil || string(claim.UID) != spec.ClaimUID || claim.DeletionTimestamp != nil {
+			if err := r.cleanupStalePlacement(ctx, object, spec); err != nil {
+				r.Logger.Error("stale placement cleanup failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
+			}
+			continue
+		}
+		if err := r.ensurePlacementOwnerReference(ctx, object, claim); err != nil {
+			r.Logger.Error("placement owner-reference repair failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
+			continue
+		}
+		live = append(live, livePlacement{object: object, spec: spec, claim: claim})
+	}
+
+	ownerships, err := r.listOwnerships(ctx)
+	if err != nil {
+		return err
+	}
+	conflicts := liveAddressConflicts(live, ownerships)
+	for i := range live {
+		placement := &live[i]
+		key := placement.object.GetNamespace() + "/" + placement.object.GetName()
+		if message := conflicts[key]; message != "" {
+			_ = r.fail(ctx, placement.object, fmt.Errorf("%s", message))
+			continue
+		}
+		if err := r.reconcileActive(ctx, placement.object, placement.claim); err != nil {
+			r.Logger.Error("placement reconciliation failed", "namespace", placement.object.GetNamespace(), "name", placement.object.GetName(), "error", err)
 		}
 	}
 	return nil
 }
 
-func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstructured.Unstructured) error {
+func decodePlacement(object *unstructured.Unstructured) (model.EndpointPlacementSpec, model.EndpointPlacementStatus, error) {
 	var spec model.EndpointPlacementSpec
-	rawSpec, _, err := unstructured.NestedMap(object.Object, "spec")
-	if err != nil {
-		return err
+	var status model.EndpointPlacementStatus
+	rawSpec, found, err := unstructured.NestedMap(object.Object, "spec")
+	if err != nil || !found {
+		return spec, status, fmt.Errorf("EndpointPlacement has no spec")
 	}
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(rawSpec, &spec); err != nil {
-		return r.fail(ctx, object, fmt.Errorf("decode placement spec: %w", err))
+		return spec, status, fmt.Errorf("decode placement spec: %w", err)
 	}
-	var oldStatus model.EndpointPlacementStatus
 	if rawStatus, found, _ := unstructured.NestedMap(object.Object, "status"); found {
-		_ = runtime.DefaultUnstructuredConverter.FromUnstructured(rawStatus, &oldStatus)
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(rawStatus, &status); err != nil {
+			return spec, status, fmt.Errorf("decode placement status: %w", err)
+		}
 	}
-	alreadyReady := oldStatus.Phase == model.PlacementReady && oldStatus.ObservedGeneration == object.GetGeneration()
+	return spec, status, nil
+}
+
+func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstructured.Unstructured) error {
+	spec, _, err := decodePlacement(object)
+	if err != nil {
+		return r.fail(ctx, object, err)
+	}
 	claim, err := r.Core.ResourceV1().ResourceClaims(object.GetNamespace()).Get(ctx, spec.ClaimName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return r.fail(ctx, object, fmt.Errorf("get ResourceClaim: %w", err))
 	}
-	if string(claim.UID) != spec.ClaimUID {
-		return r.fail(ctx, object, fmt.Errorf("ResourceClaim UID changed"))
+	if string(claim.UID) != spec.ClaimUID || claim.DeletionTimestamp != nil {
+		return nil
 	}
+	return r.reconcileActive(ctx, object, claim)
+}
+
+func (r *PlacementReconciler) reconcileActive(ctx context.Context, object *unstructured.Unstructured, claim *resourceapi.ResourceClaim) error {
+	spec, oldStatus, err := decodePlacement(object)
+	if err != nil {
+		return r.fail(ctx, object, err)
+	}
+	alreadyReady := oldStatus.Phase == model.PlacementReady && oldStatus.ObservedGeneration == object.GetGeneration()
 	// A standalone claim is briefly unreserved while its old pod is removed and
 	// its replacement is being scheduled. Keep the last successful placement as
 	// the ownership record during that handoff; clearing it would make Anchor
@@ -83,6 +154,10 @@ func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstruct
 	if len(claim.Status.ReservedFor) != 1 {
 		return r.fail(ctx, object, fmt.Errorf("claim must have exactly one active pod reservation, found %d", len(claim.Status.ReservedFor)))
 	}
+	ownerships, err := r.reserveOwnerships(ctx, object.GetNamespace(), spec)
+	if err != nil {
+		return r.fail(ctx, object, err)
+	}
 	previous := map[string]string{}
 	placed := map[string]model.PlacementPath{}
 	for _, path := range oldStatus.Paths {
@@ -90,9 +165,14 @@ func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstruct
 		placed[path.Name] = path
 	}
 	for _, path := range spec.Paths {
+		ip, _ := ownershipAddress(path)
+		previousENI := previous[path.Name]
+		if ownership := ownerships[ip]; ownership != nil && ownership.Status.ENIID != "" {
+			previousENI = ownership.Status.ENIID
+		}
 		endpoint := anchoraws.Endpoint{
 			ClaimUID: spec.ClaimUID, ClaimName: object.GetNamespace() + "/" + spec.ClaimName,
-			NodeName: spec.NodeName, Path: path, PreviousENI: previous[path.Name], ForceSteal: spec.ForceSteal,
+			NodeName: spec.NodeName, Path: path, PreviousENI: previousENI, ForceSteal: spec.ForceSteal,
 		}
 		if err := r.Strategy.Place(ctx, endpoint); err != nil {
 			if alreadyReady {
@@ -100,8 +180,11 @@ func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstruct
 			}
 			return r.failWithPaths(ctx, object, err, placementPaths(placed))
 		}
+		if err := r.markOwnershipPlaced(ctx, ownerships[ip], object.GetNamespace(), spec, path); err != nil {
+			return r.failWithPaths(ctx, object, fmt.Errorf("record ownership for %s: %w", ip, err), placementPaths(placed))
+		}
 		placed[path.Name] = path
-		if err := r.upsertNAD(ctx, object.GetNamespace(), spec.ClaimName, spec.ClaimUID, path); err != nil {
+		if err := r.upsertNAD(ctx, object, spec.ClaimName, spec.ClaimUID, path); err != nil {
 			return r.failWithPaths(ctx, object, err, placementPaths(placed))
 		}
 	}
@@ -117,34 +200,103 @@ func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstruct
 	return nil
 }
 
-func duplicateAddresses(items []unstructured.Unstructured) map[string]string {
-	owner := map[string]string{}
-	conflicts := map[string]string{}
-	for i := range items {
-		item := &items[i]
-		key := item.GetNamespace() + "/" + item.GetName()
-		raw, found, _ := unstructured.NestedMap(item.Object, "spec")
-		if !found {
-			continue
-		}
-		var spec model.EndpointPlacementSpec
-		if runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &spec) != nil {
-			continue
-		}
-		for _, path := range spec.Paths {
-			ip, err := anchoraws.AddressOnly(path.IP)
+type addressContender struct {
+	key       string
+	namespace string
+	claimName string
+}
+
+func liveAddressConflicts(placements []livePlacement, ownerships map[string]*ownershipRecord) map[string]string {
+	byAddress := map[string][]addressContender{}
+	for i := range placements {
+		placement := &placements[i]
+		key := placement.object.GetNamespace() + "/" + placement.object.GetName()
+		for _, path := range placement.spec.Paths {
+			ip, err := ownershipAddress(path)
 			if err != nil {
 				continue
 			}
-			if previous := owner[ip]; previous != "" && previous != key {
-				conflicts[previous] = ip
-				conflicts[key] = ip
+			byAddress[ip] = append(byAddress[ip], addressContender{key: key, namespace: placement.object.GetNamespace(), claimName: placement.spec.ClaimName})
+		}
+	}
+	conflicts := map[string]string{}
+	for address, contenders := range byAddress {
+		if len(contenders) < 2 {
+			continue
+		}
+		established := ownerships[address]
+		winner := ""
+		matches := 0
+		if established != nil {
+			for _, contender := range contenders {
+				if sameLogicalOwner(established.Spec, contender.namespace, contender.claimName) {
+					winner = contender.key
+					matches++
+				}
+			}
+		}
+		for _, contender := range contenders {
+			if matches == 1 && contender.key == winner {
+				continue
+			}
+			if established == nil {
+				conflicts[contender.key] = fmt.Sprintf("address %s is declared by more than one live ResourceClaim and has no established owner", address)
 			} else {
-				owner[ip] = key
+				conflicts[contender.key] = fmt.Sprintf("address %s is declared by more than one live ResourceClaim; established owner is %s/%s", address, established.Spec.ClaimNamespace, established.Spec.ClaimName)
 			}
 		}
 	}
 	return conflicts
+}
+
+func claimOwnerReference(claim *resourceapi.ResourceClaim) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: "resource.k8s.io/v1", Kind: "ResourceClaim", Name: claim.Name,
+		UID: claim.UID, Controller: &controller,
+	}
+}
+
+func placementOwnerReference(placement *unstructured.Unstructured) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: constants.APIGroup + "/" + constants.APIVersion, Kind: "EndpointPlacement",
+		Name: placement.GetName(), UID: placement.GetUID(), Controller: &controller,
+	}
+}
+
+func (r *PlacementReconciler) ensurePlacementOwnerReference(ctx context.Context, object *unstructured.Unstructured, claim *resourceapi.ResourceClaim) error {
+	desired := []metav1.OwnerReference{claimOwnerReference(claim)}
+	if reflect.DeepEqual(object.GetOwnerReferences(), desired) {
+		return nil
+	}
+	copy := object.DeepCopy()
+	copy.SetOwnerReferences(desired)
+	updated, err := r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(object.GetNamespace()).Update(ctx, copy, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+	*object = *updated
+	return nil
+}
+
+func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object *unstructured.Unstructured, spec model.EndpointPlacementSpec) error {
+	selector := constants.DriverName + "/claim-uid=" + spec.ClaimUID
+	nads, err := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(object.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("list stale NetworkAttachmentDefinitions: %w", err)
+	}
+	if err == nil {
+		for i := range nads.Items {
+			if err := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(object.GetNamespace()).Delete(ctx, nads.Items[i].GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete stale NetworkAttachmentDefinition %s: %w", nads.Items[i].GetName(), err)
+			}
+		}
+	}
+	if err := r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(object.GetNamespace()).Delete(ctx, object.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete stale EndpointPlacement: %w", err)
+	}
+	return nil
 }
 
 func (r *PlacementReconciler) fail(ctx context.Context, object *unstructured.Unstructured, cause error) error {
@@ -178,7 +330,8 @@ func (r *PlacementReconciler) updateStatus(ctx context.Context, object *unstruct
 	return err
 }
 
-func (r *PlacementReconciler) upsertNAD(ctx context.Context, namespace, claimName, claimUID string, path model.PlacementPath) error {
+func (r *PlacementReconciler) upsertNAD(ctx context.Context, placement *unstructured.Unstructured, claimName, claimUID string, path model.PlacementPath) error {
+	namespace := placement.GetNamespace()
 	name := NADName(claimName, path.Name)
 	config := map[string]any{
 		"cniVersion": "0.3.1", "name": name,
@@ -196,6 +349,7 @@ func (r *PlacementReconciler) upsertNAD(ctx context.Context, namespace, claimNam
 		"metadata": map[string]any{"name": name, "namespace": namespace, "labels": map[string]any{constants.DriverName + "/claim-uid": claimUID}},
 		"spec":     map[string]any{"config": string(encoded)},
 	}}
+	desired.SetOwnerReferences([]metav1.OwnerReference{placementOwnerReference(placement)})
 	resource := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(namespace)
 	current, err := resource.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -206,10 +360,14 @@ func (r *PlacementReconciler) upsertNAD(ctx context.Context, namespace, claimNam
 		return err
 	}
 	oldSpec, _, _ := unstructured.NestedMap(current.Object, "spec")
-	if reflect.DeepEqual(oldSpec, desired.Object["spec"]) {
+	if reflect.DeepEqual(oldSpec, desired.Object["spec"]) &&
+		reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) &&
+		reflect.DeepEqual(current.GetOwnerReferences(), desired.GetOwnerReferences()) {
 		return nil
 	}
 	current.Object["spec"] = desired.Object["spec"]
+	current.SetLabels(desired.GetLabels())
+	current.SetOwnerReferences(desired.GetOwnerReferences())
 	_, err = resource.Update(ctx, current, metav1.UpdateOptions{})
 	return err
 }
