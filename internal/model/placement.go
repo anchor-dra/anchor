@@ -39,6 +39,16 @@ type PlacementPath struct {
 	Routes     []string `json:"routes,omitempty"`
 }
 
+// BuildPlacementPath combines tenant addressing with an inventoried ENI and
+// admin-owned routing configuration.
+func BuildPlacementPath(address AddressSpec, path ENIPath, configured PathSpec) PlacementPath {
+	return PlacementPath{
+		Name: path.Name, IP: address.IP, ENIID: path.ENIID, Interface: path.Interface,
+		SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR,
+		Gateway: configured.Gateway, Routes: append([]string(nil), configured.Routes...),
+	}
+}
+
 type EndpointPlacementSpec struct {
 	ClaimName   string          `json:"claimName"`
 	ClaimUID    string          `json:"claimUID"`

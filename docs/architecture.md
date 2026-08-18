@@ -18,8 +18,19 @@ kubelet -> anchor node -> EndpointPlacement -> anchor controller -> EC2
 
 The central controller is the only component with AWS credentials. It validates
 ENI tags and subnets, writes `AnchorNodeInventory`, and applies one shared rate
-limit to all EC2 discovery and mutation calls. The node plugin maps validated ENI MACs to host interface names,
-brings those links up, and publishes ResourceSlices only for complete profiles.
+limit to all EC2 discovery and mutation calls. The node plugin maps validated
+ENI MACs to host interface names, brings those links up, and publishes
+ResourceSlices only for complete profiles.
+
+`EndpointPlacement` is an internal prepare request, not an AWS authorization
+document. Before any mutation, the controller reconstructs the expected
+placement from the ResourceClaim allocation, the exact reserved Pod UID and
+node, and the controller-written inventory spec. It accepts only the host
+interface mapping from node-written inventory status, and only when all AWS
+fields still match that spec. The claim annotation is the sole source of
+`force-steal`. A mismatched request is marked Failed without calling AWS. This
+keeps a compromised node plugin from selecting an address, ENI, or another
+node for the credentialed controller.
 
 One DRA device represents the complete set of paths in a profile. This ensures
 all addresses for a multihomed endpoint schedule together. The alpha defaults

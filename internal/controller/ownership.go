@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -205,18 +206,20 @@ type ownershipEvidence struct {
 	placedAt  time.Time
 }
 
-func (r *PlacementReconciler) migrateOwnerships(ctx context.Context, placements []unstructured.Unstructured) error {
+func (r *PlacementReconciler) migrateOwnerships(ctx context.Context, placements []livePlacement) error {
 	byAddress := map[string][]ownershipEvidence{}
 	for i := range placements {
-		spec, status, err := decodePlacement(&placements[i])
-		if err != nil {
+		placement := &placements[i]
+		if placement.status.Phase != model.PlacementReady ||
+			placement.status.ObservedGeneration != placement.object.GetGeneration() ||
+			!reflect.DeepEqual(placement.status.Paths, placement.spec.Paths) {
 			continue
 		}
 		placedAt := time.Time{}
-		if status.PlacedAt != nil {
-			placedAt = status.PlacedAt.Time
+		if placement.status.PlacedAt != nil {
+			placedAt = placement.status.PlacedAt.Time
 		}
-		for _, path := range status.Paths {
+		for _, path := range placement.status.Paths {
 			if path.ENIID == "" {
 				continue
 			}
@@ -224,7 +227,7 @@ func (r *PlacementReconciler) migrateOwnerships(ctx context.Context, placements 
 			if err != nil {
 				return err
 			}
-			byAddress[ip] = append(byAddress[ip], ownershipEvidence{namespace: placements[i].GetNamespace(), spec: spec, path: path, placedAt: placedAt})
+			byAddress[ip] = append(byAddress[ip], ownershipEvidence{namespace: placement.object.GetNamespace(), spec: placement.spec, path: path, placedAt: placedAt})
 		}
 	}
 

@@ -40,7 +40,7 @@ func TestConfiguredPlacementPathIncludesRouting(t *testing.T) {
 	path := model.ENIPath{Name: "a", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}
 	configured := model.PathSpec{Name: "a", Gateway: "10.0.1.1", Routes: []string{"192.0.2.0/24"}}
 
-	result := configuredPlacementPath(address, path, configured)
+	result := model.BuildPlacementPath(address, path, configured)
 	if result.Gateway != configured.Gateway || len(result.Routes) != 1 || result.Routes[0] != configured.Routes[0] {
 		t.Fatalf("routing was not copied to placement: %#v", result)
 	}

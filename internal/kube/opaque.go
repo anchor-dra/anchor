@@ -42,3 +42,25 @@ func AllocationParameters(claim *resourceapi.ResourceClaim) (model.DeviceClassPa
 	}
 	return class, endpoint, nil
 }
+
+// AllocationForDriver returns the claim's single Anchor device allocation.
+func AllocationForDriver(claim *resourceapi.ResourceClaim) (*resourceapi.DeviceRequestAllocationResult, error) {
+	if claim.Status.Allocation == nil {
+		return nil, fmt.Errorf("claim has no allocation")
+	}
+	var result *resourceapi.DeviceRequestAllocationResult
+	for i := range claim.Status.Allocation.Devices.Results {
+		allocation := &claim.Status.Allocation.Devices.Results[i]
+		if allocation.Driver != constants.DriverName {
+			continue
+		}
+		if result != nil {
+			return nil, fmt.Errorf("anchor claim must allocate exactly one endpoint slot")
+		}
+		result = allocation
+	}
+	if result == nil {
+		return nil, fmt.Errorf("claim has no allocation for %s", constants.DriverName)
+	}
+	return result, nil
+}

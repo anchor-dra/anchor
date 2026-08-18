@@ -147,26 +147,48 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 	if err != nil {
 		return nil, nil, fmt.Errorf("list ResourceClaims: %w", err)
 	}
-	claimsByName := make(map[string]*resourceapi.ResourceClaim, len(claims.Items))
+	pods, err := r.Core.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list Pods: %w", err)
+	}
+	inventories, err := r.Dynamic.Resource(anchorkube.InventoryGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list AnchorNodeInventories: %w", err)
+	}
+	claimsByUID := make(map[string]*resourceapi.ResourceClaim, len(claims.Items))
 	for i := range claims.Items {
 		claim := &claims.Items[i]
-		claimsByName[claim.Namespace+"/"+claim.Name] = claim
+		claimsByUID[claim.Namespace+"/"+string(claim.UID)] = claim
 	}
-	if err := r.migrateOwnerships(ctx, placements.Items); err != nil {
-		return nil, nil, fmt.Errorf("migrate durable ownership: %w", err)
+	podsByName := make(map[string]*corev1.Pod, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		podsByName[pod.Namespace+"/"+pod.Name] = pod
+	}
+	inventoriesByName := make(map[string]*unstructured.Unstructured, len(inventories.Items))
+	for i := range inventories.Items {
+		inventory := &inventories.Items[i]
+		inventoriesByName[inventory.GetName()] = inventory
 	}
 
 	live := make([]livePlacement, 0, len(placements.Items))
 	for i := range placements.Items {
 		object := &placements.Items[i]
-		spec, status, err := decodePlacement(object)
+		requested, status, err := decodePlacement(object)
 		if err != nil {
 			_ = r.fail(ctx, object, err)
 			continue
 		}
-		claim := claimsByName[object.GetNamespace()+"/"+spec.ClaimName]
-		if claim == nil || string(claim.UID) != spec.ClaimUID || claim.DeletionTimestamp != nil {
-			if err := r.cleanupStalePlacement(ctx, object, spec); err != nil {
+		claimUID, canonical := placementClaimUID(object.GetName())
+		if !canonical {
+			if err := r.deletePlacement(ctx, object); err != nil {
+				r.Logger.Error("non-canonical placement cleanup failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
+			}
+			continue
+		}
+		claim := claimsByUID[object.GetNamespace()+"/"+claimUID]
+		if claim == nil || claim.DeletionTimestamp != nil {
+			if err := r.cleanupStalePlacement(ctx, object, claimUID); err != nil {
 				r.Logger.Error("stale placement cleanup failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
 			}
 			continue
@@ -175,7 +197,22 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 			r.Logger.Error("placement owner-reference repair failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
 			continue
 		}
+		if len(claim.Status.ReservedFor) == 0 {
+			continue
+		}
+		spec, err := derivePlacement(claim, podsByName, inventoriesByName)
+		if err != nil {
+			_ = r.failForClaim(ctx, object, claim, err)
+			continue
+		}
+		if !placementRequestMatches(requested, spec) {
+			_ = r.failForClaim(ctx, object, claim, fmt.Errorf("EndpointPlacement spec does not match the claim allocation, reserved Pod, and node inventory"))
+			continue
+		}
 		live = append(live, livePlacement{object: object, spec: spec, status: status, claim: claim})
+	}
+	if err := r.migrateOwnerships(ctx, live); err != nil {
+		return nil, nil, fmt.Errorf("migrate durable ownership: %w", err)
 	}
 
 	ownerships, err := r.listOwnerships(ctx)
@@ -184,6 +221,11 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 	}
 	conflicts := liveAddressConflicts(live, ownerships)
 	return live, conflicts, nil
+}
+
+func placementClaimUID(name string) (string, bool) {
+	uid := strings.TrimPrefix(name, "claim-")
+	return uid, uid != "" && uid != name
 }
 
 func decodePlacement(object *unstructured.Unstructured) (model.EndpointPlacementSpec, model.EndpointPlacementStatus, error) {
@@ -204,38 +246,145 @@ func decodePlacement(object *unstructured.Unstructured) (model.EndpointPlacement
 	return spec, status, nil
 }
 
-func (r *PlacementReconciler) reconcileOne(ctx context.Context, object *unstructured.Unstructured) error {
-	spec, _, err := decodePlacement(object)
-	if err != nil {
-		return r.fail(ctx, object, err)
-	}
-	claim, err := r.Core.ResourceV1().ResourceClaims(object.GetNamespace()).Get(ctx, spec.ClaimName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return r.fail(ctx, object, fmt.Errorf("get ResourceClaim: %w", err))
-	}
-	if string(claim.UID) != spec.ClaimUID || claim.DeletionTimestamp != nil {
-		return nil
-	}
-	return r.reconcileActive(ctx, object, claim)
+type placementInventory struct {
+	Spec       model.AnchorNodeInventorySpec
+	Status     model.AnchorNodeInventoryStatus
+	Generation int64
 }
 
-func (r *PlacementReconciler) reconcileActive(ctx context.Context, object *unstructured.Unstructured, claim *resourceapi.ResourceClaim) error {
-	spec, oldStatus, err := decodePlacement(object)
+func derivePlacement(claim *resourceapi.ResourceClaim, pods map[string]*corev1.Pod, inventories map[string]*unstructured.Unstructured) (model.EndpointPlacementSpec, error) {
+	var result model.EndpointPlacementSpec
+	if len(claim.Status.ReservedFor) != 1 {
+		return result, fmt.Errorf("claim must have exactly one active Pod reservation, found %d", len(claim.Status.ReservedFor))
+	}
+	reservation := claim.Status.ReservedFor[0]
+	if reservation.APIGroup != "" || reservation.Resource != "pods" {
+		return result, fmt.Errorf("claim reservation must reference one core Pod")
+	}
+	pod := pods[claim.Namespace+"/"+reservation.Name]
+	if pod == nil || pod.UID != reservation.UID {
+		return result, fmt.Errorf("claim reservation does not match an existing Pod UID")
+	}
+	if pod.DeletionTimestamp != nil {
+		return result, fmt.Errorf("reserving Pod %s is terminating", pod.Name)
+	}
+	if pod.Spec.NodeName == "" {
+		return result, fmt.Errorf("reserving Pod %s is not assigned to a node", pod.Name)
+	}
+	class, params, err := anchorkube.AllocationParameters(claim)
 	if err != nil {
-		return r.fail(ctx, object, err)
+		return result, err
 	}
-	live := &livePlacement{object: object, spec: spec, status: oldStatus, claim: claim}
-	work, err := r.prepareWork(ctx, live)
+	allocation, err := anchorkube.AllocationForDriver(claim)
 	if err != nil {
-		return r.fail(ctx, object, err)
+		return result, err
 	}
-	if work == nil {
-		return nil
+	if allocation.Pool != pod.Spec.NodeName {
+		return result, fmt.Errorf("allocated pool %q does not match reserving Pod node %q", allocation.Pool, pod.Spec.NodeName)
 	}
-	return r.executeWorks(ctx, []*placementWork{work})
+	inventoryObject := inventories[pod.Spec.NodeName]
+	if inventoryObject == nil {
+		return result, fmt.Errorf("node %s has no AnchorNodeInventory", pod.Spec.NodeName)
+	}
+	inventory, err := decodePlacementInventory(inventoryObject)
+	if err != nil {
+		return result, err
+	}
+	if inventory.Spec.NodeName != pod.Spec.NodeName || inventoryObject.GetName() != pod.Spec.NodeName {
+		return result, fmt.Errorf("inventory identity does not match reserving Pod node %q", pod.Spec.NodeName)
+	}
+	if !inventory.Status.Ready || inventory.Status.ObservedGeneration != inventory.Generation {
+		return result, fmt.Errorf("node inventory %s is not Ready for its current generation", pod.Spec.NodeName)
+	}
+	authoritative, mapped, err := trustedInventoryPaths(inventory, class.Profile)
+	if err != nil {
+		return result, err
+	}
+	if len(authoritative) != len(class.Paths) {
+		return result, fmt.Errorf("profile %q inventory does not match its allocated DeviceClass", class.Profile)
+	}
+	subnetCIDRs := make(map[string]string, len(authoritative))
+	configuredByName := make(map[string]model.PathSpec, len(class.Paths))
+	for _, configured := range class.Paths {
+		path, found := authoritative[configured.Name]
+		if !found || path.SubnetID != configured.SubnetID || !model.TagsMatch(path.Tags, configured.ENITagSelector) {
+			return result, fmt.Errorf("path %q inventory does not match its allocated DeviceClass", configured.Name)
+		}
+		configuredByName[configured.Name] = configured
+		subnetCIDRs[path.SubnetID] = path.SubnetCIDR
+	}
+	if err := params.Validate(class, subnetCIDRs); err != nil {
+		return result, err
+	}
+	paths := make([]model.PlacementPath, 0, len(params.Addresses))
+	for _, address := range params.Addresses {
+		path, found := authoritative[address.Path]
+		if !found {
+			return result, fmt.Errorf("path %q is missing from controller inventory", address.Path)
+		}
+		path.Interface = mapped[address.Path].Interface
+		paths = append(paths, model.BuildPlacementPath(address, path, configuredByName[address.Path]))
+	}
+	result = model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(claim.UID), NodeName: pod.Spec.NodeName,
+		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
+		Strategy: class.Strategy, ForceSteal: strings.EqualFold(claim.Annotations[constants.ForceStealAnnotation], "true"), Paths: paths,
+	}
+	return result, nil
+}
+
+func decodePlacementInventory(object *unstructured.Unstructured) (*placementInventory, error) {
+	result := &placementInventory{Generation: object.GetGeneration()}
+	rawSpec, found, err := unstructured.NestedMap(object.Object, "spec")
+	if err != nil || !found {
+		return nil, fmt.Errorf("AnchorNodeInventory %s has no spec", object.GetName())
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(rawSpec, &result.Spec); err != nil {
+		return nil, fmt.Errorf("decode AnchorNodeInventory %s spec: %w", object.GetName(), err)
+	}
+	rawStatus, found, err := unstructured.NestedMap(object.Object, "status")
+	if err != nil || !found {
+		return nil, fmt.Errorf("AnchorNodeInventory %s has no status", object.GetName())
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(rawStatus, &result.Status); err != nil {
+		return nil, fmt.Errorf("decode AnchorNodeInventory %s status: %w", object.GetName(), err)
+	}
+	return result, nil
+}
+
+func trustedInventoryPaths(inventory *placementInventory, profile string) (map[string]model.ENIPath, map[string]model.ENIPath, error) {
+	specPaths := inventory.Spec.Profiles[profile]
+	statusPaths := inventory.Status.Interfaces[profile]
+	if len(specPaths) == 0 || len(statusPaths) != len(specPaths) {
+		return nil, nil, fmt.Errorf("profile %q is not completely mapped in node inventory", profile)
+	}
+	authoritative := make(map[string]model.ENIPath, len(specPaths))
+	for _, path := range specPaths {
+		if path.Name == "" || authoritative[path.Name].Name != "" {
+			return nil, nil, fmt.Errorf("profile %q has an invalid or duplicate controller inventory path", profile)
+		}
+		authoritative[path.Name] = path
+	}
+	mapped := make(map[string]model.ENIPath, len(statusPaths))
+	for _, path := range statusPaths {
+		if path.Interface == "" || mapped[path.Name].Name != "" {
+			return nil, nil, fmt.Errorf("profile %q has an invalid or duplicate node interface mapping", profile)
+		}
+		expected, found := authoritative[path.Name]
+		withoutInterface := path
+		withoutInterface.Interface = ""
+		if !found || !reflect.DeepEqual(withoutInterface, expected) {
+			return nil, nil, fmt.Errorf("node-reported path %q does not match controller inventory", path.Name)
+		}
+		mapped[path.Name] = path
+	}
+	return authoritative, mapped, nil
+}
+
+func placementRequestMatches(requested, expected model.EndpointPlacementSpec) bool {
+	requested.ForceSteal = false
+	expected.ForceSteal = false
+	return reflect.DeepEqual(requested, expected)
 }
 
 func (r *PlacementReconciler) prepareWork(ctx context.Context, placement *livePlacement) (*placementWork, error) {
@@ -414,8 +563,8 @@ func (r *PlacementReconciler) ensurePlacementOwnerReference(ctx context.Context,
 	return nil
 }
 
-func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object *unstructured.Unstructured, spec model.EndpointPlacementSpec) error {
-	selector := constants.DriverName + "/claim-uid=" + spec.ClaimUID
+func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object *unstructured.Unstructured, claimUID string) error {
+	selector := constants.DriverName + "/claim-uid=" + claimUID
 	nads, err := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(object.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("list stale NetworkAttachmentDefinitions: %w", err)
@@ -427,6 +576,10 @@ func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object 
 			}
 		}
 	}
+	return r.deletePlacement(ctx, object)
+}
+
+func (r *PlacementReconciler) deletePlacement(ctx context.Context, object *unstructured.Unstructured) error {
 	if err := r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(object.GetNamespace()).Delete(ctx, object.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete stale EndpointPlacement: %w", err)
 	}
@@ -435,6 +588,18 @@ func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object 
 
 func (r *PlacementReconciler) fail(ctx context.Context, object *unstructured.Unstructured, cause error) error {
 	return r.failWithPaths(ctx, object, cause, nil)
+}
+
+func (r *PlacementReconciler) failForClaim(ctx context.Context, object *unstructured.Unstructured, claim *resourceapi.ResourceClaim, cause error) error {
+	previousPhase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
+	status := model.EndpointPlacementStatus{Phase: model.PlacementFailed, Message: cause.Error(), ObservedGeneration: object.GetGeneration()}
+	if err := r.updateStatus(ctx, object, status); err != nil {
+		return cause
+	}
+	if previousPhase != model.PlacementFailed {
+		r.emit(ctx, claim.Namespace, claim.Name, claim.UID, corev1.EventTypeWarning, "EndpointPlacementFailed", cause.Error())
+	}
+	return cause
 }
 
 func (r *PlacementReconciler) failWithPaths(ctx context.Context, object *unstructured.Unstructured, cause error, paths []model.PlacementPath) error {

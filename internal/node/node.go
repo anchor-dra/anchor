@@ -119,7 +119,7 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 	if len(claim.Status.ReservedFor) > 1 {
 		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has %d consumers; anchor permits one", claim.Namespace, claim.Name, len(claim.Status.ReservedFor))}
 	}
-	allocation, err := allocationForDriver(claim)
+	allocation, err := anchorkube.AllocationForDriver(claim)
 	if err != nil {
 		return kubeletplugin.PrepareResult{Err: err}
 	}
@@ -151,7 +151,7 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 			return kubeletplugin.PrepareResult{Err: fmt.Errorf("path %q has no ready host interface", address.Path)}
 		}
 		configured := classByName[address.Path]
-		placementPaths = append(placementPaths, configuredPlacementPath(address, path, configured))
+		placementPaths = append(placementPaths, model.BuildPlacementPath(address, path, configured))
 	}
 	force := strings.EqualFold(claim.Annotations[constants.ForceStealAnnotation], "true")
 	spec := model.EndpointPlacementSpec{
@@ -182,14 +182,6 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 	return kubeletplugin.PrepareResult{Devices: []kubeletplugin.Device{{Requests: []string{allocation.Request}, PoolName: allocation.Pool, DeviceName: allocation.Device}}}
 }
 
-func configuredPlacementPath(address model.AddressSpec, path model.ENIPath, configured model.PathSpec) model.PlacementPath {
-	return model.PlacementPath{
-		Name: path.Name, IP: address.IP, ENIID: path.ENIID, Interface: path.Interface,
-		SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR,
-		Gateway: configured.Gateway, Routes: append([]string(nil), configured.Routes...),
-	}
-}
-
 func (p *Plugin) UnprepareResourceClaims(_ context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	result := make(map[types.UID]error, len(claims))
 	for _, claim := range claims {
@@ -200,27 +192,6 @@ func (p *Plugin) UnprepareResourceClaims(_ context.Context, claims []kubeletplug
 
 func (p *Plugin) HandleError(ctx context.Context, err error, message string) {
 	klog.FromContext(ctx).Error(err, message)
-}
-
-func allocationForDriver(claim *resourceapi.ResourceClaim) (*resourceapi.DeviceRequestAllocationResult, error) {
-	if claim.Status.Allocation == nil {
-		return nil, fmt.Errorf("claim has no allocation")
-	}
-	var result *resourceapi.DeviceRequestAllocationResult
-	for i := range claim.Status.Allocation.Devices.Results {
-		allocation := &claim.Status.Allocation.Devices.Results[i]
-		if allocation.Driver != constants.DriverName {
-			continue
-		}
-		if result != nil {
-			return nil, fmt.Errorf("anchor claim must allocate exactly one endpoint slot")
-		}
-		result = allocation
-	}
-	if result == nil {
-		return nil, fmt.Errorf("claim has no allocation for %s", constants.DriverName)
-	}
-	return result, nil
 }
 
 func (p *Plugin) upsertPlacement(ctx context.Context, claim *resourceapi.ResourceClaim, name string, spec model.EndpointPlacementSpec) (int64, error) {

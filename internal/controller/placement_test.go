@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +21,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	anchoraws "github.com/anchor-dra/anchor/internal/aws"
+	"github.com/anchor-dra/anchor/internal/constants"
 	anchorkube "github.com/anchor-dra/anchor/internal/kube"
 	"github.com/anchor-dra/anchor/internal/model"
 )
@@ -93,6 +95,61 @@ func testPlacement(t *testing.T, namespace, name string, uid types.UID, spec mod
 	return object
 }
 
+func authorizePlacement(t *testing.T, claim *resourceapi.ResourceClaim, spec *model.EndpointPlacementSpec) (*corev1.Pod, *unstructured.Unstructured) {
+	t.Helper()
+	profile := "test-profile"
+	spec.RequestName = "endpoint"
+	spec.PoolName = spec.NodeName
+	spec.DeviceName = profile + "-slot-0"
+	if spec.Strategy == "" {
+		spec.Strategy = model.StrategyIPReassign
+	}
+	classPaths := make([]model.PathSpec, 0, len(spec.Paths))
+	addresses := make([]model.AddressSpec, 0, len(spec.Paths))
+	inventorySpecPaths := make([]model.ENIPath, 0, len(spec.Paths))
+	inventoryStatusPaths := make([]model.ENIPath, 0, len(spec.Paths))
+	for _, path := range spec.Paths {
+		classPaths = append(classPaths, model.PathSpec{Name: path.Name, SubnetID: path.SubnetID, ENITagSelector: model.TagSelector{"test": "true"}, Gateway: path.Gateway, Routes: append([]string(nil), path.Routes...)})
+		addresses = append(addresses, model.AddressSpec{Path: path.Name, IP: path.IP})
+		inventoryPath := model.ENIPath{Name: path.Name, ENIID: path.ENIID, SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR, Tags: map[string]string{"test": "true"}}
+		inventorySpecPaths = append(inventorySpecPaths, inventoryPath)
+		inventoryPath.Interface = path.Interface
+		inventoryStatusPaths = append(inventoryStatusPaths, inventoryPath)
+	}
+	classRaw, err := json.Marshal(model.DeviceClassParameters{Strategy: spec.Strategy, Profile: profile, SlotsPerNode: 1, Paths: classPaths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimRaw, err := json.Marshal(model.ClaimParameters{Addresses: addresses})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim.Status.Allocation = &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{
+		Results: []resourceapi.DeviceRequestAllocationResult{{Request: spec.RequestName, Driver: constants.DriverName, Pool: spec.PoolName, Device: spec.DeviceName}},
+		Config: []resourceapi.DeviceAllocationConfiguration{
+			{Source: resourceapi.AllocationConfigSourceClass, DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{Driver: constants.DriverName, Parameters: runtime.RawExtension{Raw: classRaw}}}},
+			{Source: resourceapi.AllocationConfigSourceClaim, DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{Driver: constants.DriverName, Parameters: runtime.RawExtension{Raw: claimRaw}}}},
+		},
+	}}
+	if spec.ForceSteal {
+		if claim.Annotations == nil {
+			claim.Annotations = map[string]string{}
+		}
+		claim.Annotations[constants.ForceStealAnnotation] = "true"
+	}
+	reservation := claim.Status.ReservedFor[0]
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: reservation.Name, Namespace: claim.Namespace, UID: reservation.UID}, Spec: corev1.PodSpec{NodeName: spec.NodeName}}
+	inventorySpec := model.AnchorNodeInventorySpec{NodeName: spec.NodeName, Profiles: map[string][]model.ENIPath{profile: inventorySpecPaths}, SlotsPerNode: map[string]int{profile: 1}}
+	inventoryStatus := model.AnchorNodeInventoryStatus{Ready: true, ObservedGeneration: 1, Interfaces: map[string][]model.ENIPath{profile: inventoryStatusPaths}}
+	rawSpec, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&inventorySpec)
+	rawStatus, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&inventoryStatus)
+	inventory := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": constants.APIGroup + "/" + constants.APIVersion, "kind": "AnchorNodeInventory",
+		"metadata": map[string]any{"name": spec.NodeName, "generation": int64(1)}, "spec": rawSpec, "status": rawStatus,
+	}}
+	return pod, inventory
+}
+
 func testOwnership(t *testing.T, address, namespace, claimName, eni string) *unstructured.Unstructured {
 	t.Helper()
 	name, err := OwnershipName(address)
@@ -111,6 +168,7 @@ func testOwnership(t *testing.T, address, namespace, claimName, eni string) *uns
 
 func testDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	listKinds := map[schema.GroupVersionResource]string{
+		anchorkube.InventoryGVR: "AnchorNodeInventoryList",
 		anchorkube.PlacementGVR: "EndpointPlacementList",
 		anchorkube.OwnershipGVR: "EndpointOwnershipList",
 		anchorkube.NADGVR:       "NetworkAttachmentDefinitionList",
@@ -164,13 +222,14 @@ func TestPartialPlacementRetainsSuccessfulPath(t *testing.T) {
 		"metadata": map[string]any{"name": "claim-" + string(uid), "namespace": "test", "generation": int64(1)},
 	}}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.10/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a"}, {Name: "b", IP: "10.0.2.10/24", ENIID: "eni-b", Interface: "ens7", SubnetID: "subnet-b"}}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	raw, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&spec)
 	placement.Object["spec"] = raw
-	dynamicClient := testDynamicClient(placement)
+	dynamicClient := testDynamicClient(placement, inventory)
 	strategy := &partialStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
-	if err := reconciler.reconcileOne(ctx, placement); err == nil {
-		t.Fatal("expected injected failure")
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
 	}
 	updated, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace("test").Get(ctx, placement.GetName(), metav1.GetOptions{})
 	if err != nil {
@@ -202,7 +261,7 @@ func TestUnreservedClaimRetainsPreviousPlacement(t *testing.T) {
 	dynamicClient := testDynamicClient(placement)
 	strategy := &partialStrategy{}
 	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
-	if err := reconciler.reconcileOne(ctx, placement); err != nil {
+	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if strategy.calls != 0 {
@@ -249,11 +308,12 @@ func TestRecreatedClaimUsesDurablePreviousENI(t *testing.T) {
 	claim := testClaim("test", "endpoint", uid)
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.10/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	placement := testPlacement(t, "test", "claim-"+string(uid), uid, spec, nil)
 	ownership := testOwnership(t, path.IP, "test", claim.Name, "eni-old")
-	dynamicClient := testDynamicClient(placement, ownership)
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -286,7 +346,7 @@ func TestRecreatedClaimUsesDurablePreviousENI(t *testing.T) {
 	}
 }
 
-func TestStaleClaimMigrationDoesNotConflictWithRecreation(t *testing.T) {
+func TestStaleClaimCleanupDoesNotConflictWithRecreation(t *testing.T) {
 	ctx := context.Background()
 	oldUID := types.UID("44444444-4444-4444-4444-444444444444")
 	newUID := types.UID("55555555-5555-5555-5555-555555555555")
@@ -296,6 +356,7 @@ func TestStaleClaimMigrationDoesNotConflictWithRecreation(t *testing.T) {
 	newPath.ENIID = "eni-new"
 	oldSpec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(oldUID), NodeName: "node-old", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{oldPath}}
 	newSpec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(newUID), NodeName: "node-new", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{newPath}}
+	pod, inventory := authorizePlacement(t, claim, &newSpec)
 	oldStatus := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{oldPath}}
 	oldPlacement := testPlacement(t, "recreated", "claim-"+string(oldUID), oldUID, oldSpec, oldStatus)
 	newPlacement := testPlacement(t, "recreated", "claim-"+string(newUID), newUID, newSpec, nil)
@@ -304,9 +365,10 @@ func TestStaleClaimMigrationDoesNotConflictWithRecreation(t *testing.T) {
 		"metadata": map[string]any{"name": NADName(claim.Name, "a"), "namespace": "recreated", "labels": map[string]any{"dra.anchordra.co/claim-uid": string(oldUID)}},
 		"spec":     map[string]any{"config": "old"},
 	}}
-	dynamicClient := testDynamicClient(oldPlacement, newPlacement, oldNAD)
+	ownership := testOwnership(t, oldPath.IP, claim.Namespace, claim.Name, "eni-old")
+	dynamicClient := testDynamicClient(oldPlacement, newPlacement, oldNAD, ownership, inventory)
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -317,12 +379,12 @@ func TestStaleClaimMigrationDoesNotConflictWithRecreation(t *testing.T) {
 	if _, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace("recreated").Get(ctx, oldPlacement.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("stale placement still exists: %v", err)
 	}
-	ownership, err := reconciler.getOwnership(ctx, newPath.IP)
+	storedOwnership, err := reconciler.getOwnership(ctx, newPath.IP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ownership.Status.ENIID != "eni-new" || ownership.Status.ClaimUID != string(newUID) {
-		t.Fatalf("ownership did not move to recreated claim: %#v", ownership.Status)
+	if storedOwnership.Status.ENIID != "eni-new" || storedOwnership.Status.ClaimUID != string(newUID) {
+		t.Fatalf("ownership did not move to recreated claim: %#v", storedOwnership.Status)
 	}
 	nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("recreated").Get(ctx, NADName(claim.Name, "a"), metav1.GetOptions{})
 	if err != nil {
@@ -345,12 +407,14 @@ func TestEstablishedOwnerWinsLiveDuplicate(t *testing.T) {
 	otherPath.ENIID = "eni-other"
 	ownerSpec := model.EndpointPlacementSpec{ClaimName: ownerClaim.Name, ClaimUID: string(ownerUID), NodeName: "node-owner", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{ownerPath}}
 	otherSpec := model.EndpointPlacementSpec{ClaimName: otherClaim.Name, ClaimUID: string(otherUID), NodeName: "node-other", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{otherPath}}
+	ownerPod, ownerInventory := authorizePlacement(t, ownerClaim, &ownerSpec)
+	otherPod, otherInventory := authorizePlacement(t, otherClaim, &otherSpec)
 	ownerPlacement := testPlacement(t, "owner", "claim-"+string(ownerUID), ownerUID, ownerSpec, nil)
 	otherPlacement := testPlacement(t, "other", "claim-"+string(otherUID), otherUID, otherSpec, nil)
 	ownership := testOwnership(t, address, "owner", "endpoint", "eni-old")
-	dynamicClient := testDynamicClient(ownerPlacement, otherPlacement, ownership)
+	dynamicClient := testDynamicClient(ownerPlacement, otherPlacement, ownership, ownerInventory, otherInventory)
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(ownerClaim, otherClaim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(ownerClaim, otherClaim, ownerPod, otherPod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -377,14 +441,18 @@ func TestAmbiguousLiveDuplicateFailsWithoutCreatingOwnership(t *testing.T) {
 		testClaim("b", "endpoint", types.UID("99999999-9999-9999-9999-999999999999")),
 	}
 	objects := []runtime.Object{}
+	coreObjects := []runtime.Object{claims[0], claims[1]}
 	for _, claim := range claims {
 		path := model.PlacementPath{Name: "a", IP: address, ENIID: "eni-" + claim.Namespace, Interface: "ens6", SubnetID: "subnet-a"}
 		spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(claim.UID), NodeName: "node-" + claim.Namespace, Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+		pod, inventory := authorizePlacement(t, claim, &spec)
 		objects = append(objects, testPlacement(t, claim.Namespace, "claim-"+string(claim.UID), claim.UID, spec, nil))
+		objects = append(objects, inventory)
+		coreObjects = append(coreObjects, pod)
 	}
 	dynamicClient := testDynamicClient(objects...)
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claims[0], claims[1]), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(coreObjects...), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -403,11 +471,12 @@ func TestForceStealTransfersDurableOwnership(t *testing.T) {
 	claim := testClaim("new", "endpoint", uid)
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.50/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyIPReassign, ForceSteal: true, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	placement := testPlacement(t, "new", "claim-"+string(uid), uid, spec, nil)
 	ownership := testOwnership(t, path.IP, "old", "endpoint", "eni-old")
-	dynamicClient := testDynamicClient(placement, ownership)
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -430,11 +499,12 @@ func TestFailedForceStealDoesNotTransferDurableOwnership(t *testing.T) {
 	claim := testClaim("new", "endpoint", uid)
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.60/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyIPReassign, ForceSteal: true, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	placement := testPlacement(t, "new", "claim-"+string(uid), uid, spec, nil)
 	ownership := testOwnership(t, path.IP, "old", "endpoint", "eni-old")
-	dynamicClient := testDynamicClient(placement, ownership)
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
 	strategy := &recordingStrategy{err: errors.New("injected placement failure")}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -445,6 +515,109 @@ func TestFailedForceStealDoesNotTransferDurableOwnership(t *testing.T) {
 	}
 	if !sameLogicalOwner(updated.Spec, "old", "endpoint") || updated.Status.ENIID != "eni-old" {
 		t.Fatalf("failed placement transferred ownership: %#v", updated)
+	}
+}
+
+func TestForgedPlacementSpecCannotSelectAWSResources(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("bcbcbcbc-bcbc-bcbc-bcbc-bcbcbcbcbcbc")
+	claim := testClaim("test", "endpoint", uid)
+	authorized := model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign,
+		Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.70/24", ENIID: "eni-authorized", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+	}
+	pod, inventory := authorizePlacement(t, claim, &authorized)
+	forged := authorized
+	forged.NodeName = "node-attacker"
+	forged.Paths = append([]model.PlacementPath(nil), authorized.Paths...)
+	forged.Paths[0].IP = "10.0.1.99/24"
+	forged.Paths[0].ENIID = "eni-attacker"
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, forged, nil)
+	strategy := &recordingStrategy{}
+	dynamicClient := testDynamicClient(placement, inventory)
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 0 {
+		t.Fatalf("forged placement reached AWS strategy: %#v", strategy.endpoints)
+	}
+	stored, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase, _, _ := unstructured.NestedString(stored.Object, "status", "phase")
+	if phase != model.PlacementFailed {
+		t.Fatalf("forged placement phase = %q, want %q", phase, model.PlacementFailed)
+	}
+}
+
+func TestForceStealIsDerivedFromClaimAnnotation(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		claimForce     bool
+		placementForce bool
+	}{
+		{name: "placement cannot enable force", placementForce: true},
+		{name: "claim can enable force", claimForce: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			uid := types.UID("cdcdcdcd-cdcd-cdcd-cdcd-" + strings.ReplaceAll(tt.name, " ", "-"))
+			claim := testClaim("test", "endpoint-"+strings.ReplaceAll(tt.name, " ", "-"), uid)
+			spec := model.EndpointPlacementSpec{
+				ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign,
+				Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.71/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+			}
+			pod, inventory := authorizePlacement(t, claim, &spec)
+			if tt.claimForce {
+				claim.Annotations = map[string]string{constants.ForceStealAnnotation: "true"}
+			}
+			spec.ForceSteal = tt.placementForce
+			placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+			strategy := &recordingStrategy{}
+			reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: testDynamicClient(placement, inventory), Strategy: strategy}
+
+			if err := reconciler.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(strategy.endpoints) != 1 || strategy.endpoints[0].ForceSteal != tt.claimForce {
+				t.Fatalf("strategy force-steal = %#v, want %t", strategy.endpoints, tt.claimForce)
+			}
+		})
+	}
+}
+
+func TestPlacementRequiresAllocationOnReservedPodNode(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("dededede-dede-dede-dede-dededededede")
+	claim := testClaim("test", "endpoint", uid)
+	spec := model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign,
+		Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.72/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}},
+	}
+	pod, inventory := authorizePlacement(t, claim, &spec)
+	pod.Spec.NodeName = "node-b"
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+	strategy := &recordingStrategy{}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: testDynamicClient(placement, inventory), Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 0 {
+		t.Fatalf("mismatched pod node reached AWS strategy: %#v", strategy.endpoints)
+	}
+}
+
+func TestNodeInventoryStatusCannotChangeAWSIdentity(t *testing.T) {
+	inventory := &placementInventory{
+		Spec:   model.AnchorNodeInventorySpec{Profiles: map[string][]model.ENIPath{"carrier": {{Name: "a", ENIID: "eni-authorized", SubnetID: "subnet-a"}}}},
+		Status: model.AnchorNodeInventoryStatus{Interfaces: map[string][]model.ENIPath{"carrier": {{Name: "a", ENIID: "eni-forged", SubnetID: "subnet-a", Interface: "ens6"}}}},
+	}
+	if _, _, err := trustedInventoryPaths(inventory, "carrier"); err == nil || !strings.Contains(err.Error(), "does not match controller inventory") {
+		t.Fatalf("expected forged inventory status to be rejected, got %v", err)
 	}
 }
 
@@ -540,18 +713,20 @@ func TestAmbiguousLegacyOwnershipFailsWithoutGuessing(t *testing.T) {
 	ctx := context.Background()
 	address := "10.0.1.80/24"
 	objects := []runtime.Object{}
-	claims := []runtime.Object{}
+	coreObjects := []runtime.Object{}
 	for i, namespace := range []string{"first", "second"} {
 		uid := types.UID(fmt.Sprintf("dddddddd-dddd-dddd-dddd-dddddddddd%02d", i))
 		claim := testClaim(namespace, "endpoint", uid)
-		claims = append(claims, claim)
 		path := model.PlacementPath{Name: "a", IP: address, ENIID: "eni-" + namespace, Interface: "ens6", SubnetID: "subnet-a"}
 		spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-" + namespace, Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+		pod, inventory := authorizePlacement(t, claim, &spec)
 		status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{path}}
 		objects = append(objects, testPlacement(t, namespace, "claim-"+string(uid), uid, spec, status))
+		objects = append(objects, inventory)
+		coreObjects = append(coreObjects, claim, pod)
 	}
 	dynamicClient := testDynamicClient(objects...)
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claims...), Dynamic: dynamicClient, Strategy: &recordingStrategy{}}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(coreObjects...), Dynamic: dynamicClient, Strategy: &recordingStrategy{}}
 
 	err := reconciler.Reconcile(ctx)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous legacy owners") {
@@ -568,10 +743,11 @@ func TestFailureStatusAndEventsAreNotRepeated(t *testing.T) {
 	claim := testClaim("test", "endpoint", uid)
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.90/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	placement := testPlacement(t, "test", "claim-"+string(uid), uid, spec, nil)
 	ownership := testOwnership(t, path.IP, "test", claim.Name, "eni-old")
-	dynamicClient := testDynamicClient(placement, ownership)
-	coreClient := fake.NewSimpleClientset(claim)
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
+	coreClient := fake.NewSimpleClientset(claim, pod)
 	strategy := &recordingStrategy{err: errors.New("first failure")}
 	reconciler := &PlacementReconciler{Core: coreClient, Dynamic: dynamicClient, Strategy: strategy}
 
@@ -633,11 +809,12 @@ func TestReadyPlacementIsOnlyCheckedByDriftReconcile(t *testing.T) {
 		{Name: "b", IP: "10.0.2.110/24", ENIID: "eni-b", Interface: "ens7", SubnetID: "subnet-b"},
 	}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign, Paths: paths}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: paths}
 	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
-	dynamicClient := testDynamicClient(placement, testOwnership(t, paths[0].IP, claim.Namespace, claim.Name, paths[0].ENIID), testOwnership(t, paths[1].IP, claim.Namespace, claim.Name, paths[1].ENIID))
+	dynamicClient := testDynamicClient(placement, inventory, testOwnership(t, paths[0].IP, claim.Namespace, claim.Name, paths[0].ENIID), testOwnership(t, paths[1].IP, claim.Namespace, claim.Name, paths[1].ENIID))
 	strategy := &recordingStrategy{}
-	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)

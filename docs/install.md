@@ -159,3 +159,11 @@ default and enabled only by the explicit Kubespray instance-profile setting.
 The node plugin receives no AWS Secret or IRSA annotation. It runs in the host
 network namespace with only `NET_ADMIN`, which is needed to make hot-attached
 parent links usable, and has `allowPrivilegeEscalation: false`.
+
+Do not grant tenants access to `EndpointPlacement`, `EndpointOwnership`, or
+`AnchorNodeInventory`; they are driver-internal APIs. Namespace users need only
+create the ResourceClaim and workload objects allowed by the platform. The
+controller independently derives every AWS mutation from the allocated claim,
+its reserved Pod, and controller inventory, but access to the force-steal claim
+annotation should still be restricted to the platform's endpoint transfer
+procedure.

@@ -82,14 +82,15 @@ func TestInventoryFailureDoesNotBlockPlacement(t *testing.T) {
 	claim := testClaim("test", "endpoint", uid)
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.100/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: badNode.Name, Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
 	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
 	ownership := testOwnership(t, path.IP, claim.Namespace, claim.Name, "eni-old")
-	dynamicClient := testDynamicClient(placement, ownership)
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
 	strategy := &recordingStrategy{}
 
 	controller := &Controller{
 		Inventory: &InventoryReconciler{Core: fake.NewSimpleClientset(badNode), Dynamic: dynamicClient, EC2: &failingNodeDiscovery{}},
-		Placement: &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: strategy},
+		Placement: &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy},
 	}
 	err := controller.Reconcile(ctx)
 	if err == nil || !strings.Contains(err.Error(), "describe attached ENIs") {
