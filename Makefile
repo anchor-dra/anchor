@@ -16,8 +16,9 @@ vet:
 	go vet ./...
 
 helm:
-	helm lint charts/anchor
-	helm template anchor charts/anchor --namespace anchor-system >/dev/null
+	helm lint charts/anchor --set aws.region=eu-west-1
+	helm template anchor charts/anchor --namespace anchor-system --kube-version 1.34.0 \
+		--set aws.region=eu-west-1 >/dev/null
 
 check: test-race vet helm
 
