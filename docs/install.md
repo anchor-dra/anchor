@@ -9,6 +9,8 @@
   candidate node. All ENIs for an endpoint must be in the same AZ as the node.
 - A controller IAM identity with EC2 describe permissions and tag-scoped
   `AssignPrivateIpAddresses`.
+- Exclusive control of every configured static address by one active Anchor
+  installation. Clusters sharing a subnet must use non-overlapping addresses.
 
 Calico and Cilium do not normally manage extra ENIs. When VPC CNI is primary,
 exclude carrier ENIs from ipamd before installing Anchor. Anchor 0.1 does not
@@ -151,6 +153,43 @@ same static addresses. To release an endpoint intentionally:
 If a live claim still exists, the controller recreates its missing ownership
 record. A later claim with a different namespace/name cannot take an address
 that still has an ownership record without `force-steal`.
+
+## Disaster recovery and cluster replacement
+
+Include cluster-scoped `EndpointOwnership` resources in the Kubernetes or etcd
+backup used for Anchor disaster recovery. They are Anchor's only durable record
+of the logical claim owner and last successful ENI placement; AWS does not hold
+an equivalent Anchor ownership marker.
+
+Before bringing up a replacement cluster against the same address range:
+
+1. Stop the old Anchor controller or revoke its AWS mutation permission. Do not
+   run two active controllers with force takeover enabled.
+2. Restore the ownership records when available and confirm their claim names,
+   addresses, and ENIs before creating replacement claims.
+3. If the records cannot be restored, inspect the current AWS ENI assignment,
+   confirm the old controller is fenced, and temporarily authorize the intended
+   replacement claim:
+
+   ```bash
+   kubectl annotate resourceclaim -n NAMESPACE CLAIM_NAME \
+     dra.anchordra.co/force-steal=true --overwrite
+   ```
+
+4. Wait for the replacement `EndpointPlacement` to become `Ready`, verify the
+   address on the expected ENI and pod interface, then immediately remove the
+   takeover permission:
+
+   ```bash
+   kubectl annotate resourceclaim -n NAMESPACE CLAIM_NAME \
+     dra.anchordra.co/force-steal-
+   ```
+
+Without `force-steal`, a second cluster safely refuses an address assigned to an
+unknown ENI. With it left enabled on two clusters, each cluster can undo the
+other's placement during reconciliation. Anchor 0.1 therefore does not support
+active/active or automatically coordinated active/standby clusters sharing an
+address range.
 
 ## Security boundary
 

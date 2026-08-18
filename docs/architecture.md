@@ -81,6 +81,32 @@ strategy and from infrastructure-owned DX/TGW route advertisement.
   `force-steal` is explicit and the AWS reassignment succeeds. Failed mutations
   never transfer the durable ownership record.
 
+## Ownership scope and multi-cluster limitation
+
+`EndpointOwnership` is durable across claim and namespace recreation, but it is
+stored only in the Kubernetes cluster. Anchor 0.1 has no AWS-side ownership
+record and does not coordinate between clusters. Operate only one active Anchor
+installation for any given static address. Clusters may share a subnet only
+when their claimed address sets cannot overlap.
+
+A second cluster without `force-steal` refuses to move an address from an
+unknown ENI. If two active clusters both retain `force-steal`, they can
+repeatedly reassign the address between their ENIs. Ready placements detect
+this through the drift check, which defaults to 60 seconds; failed placements
+retry on the two-second pending reconciliation interval.
+
+For disaster recovery, restore the Kubernetes ownership records when possible.
+If they are unavailable, fence the old controller by stopping it or removing
+its AWS mutation permission before authorizing a force takeover. `force-steal`
+is a temporary recovery action and must be removed after the new placement is
+Ready.
+
+AWS tags apply to an ENI, not to an individual secondary private IPv4 address,
+and tagging is not atomic with IP reassignment. A later release may require an
+immutable installation-identity tag on carrier ENIs to reject foreign-cluster
+ownership. True active/standby multi-cluster coordination requires an external,
+strongly consistent lease and is outside the 0.1 scope.
+
 The alpha implements IPv4 and `ip-reassign` within one AZ. AWS route repointing,
 pool allocation, IPv6, cross-AZ mobility, and ENI lifecycle management are not
 implemented.
