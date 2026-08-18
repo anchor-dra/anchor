@@ -35,6 +35,19 @@ lookups across all pending paths; Ready endpoints use one batched, read-only
 owner lookup and enter the placement path only when drift is detected. AWS
 pagination and a shared rate limiter apply to every batch.
 
+## Pod routing
+
+Each DeviceClass path may define one explicit IPv4 gateway and a list of
+remote IPv4 CIDRs. The node plugin carries that admin-owned configuration into
+the EndpointPlacement, and the controller writes it into the claim-specific
+static-IPAM NAD. The chained `sbr` plugin then gives traffic bound to each
+claimed address its own routing table and carrier-interface gateway.
+
+When gateway and routes are omitted, the path intentionally supports only its
+directly connected subnet. Anchor never derives a gateway from a subnet CIDR.
+These pod routes are independent from the future AWS `route-repoint` placement
+strategy and from infrastructure-owned DX/TGW route advertisement.
+
 ## Failure semantics
 
 - A path failure is handled by SCTP without an EC2 mutation.
@@ -57,6 +70,6 @@ pagination and a shared rate limiter apply to every batch.
   `force-steal` is explicit and the AWS reassignment succeeds. Failed mutations
   never transfer the durable ownership record.
 
-The alpha implements IPv4 and `ip-reassign` within one AZ. Route repointing,
+The alpha implements IPv4 and `ip-reassign` within one AZ. AWS route repointing,
 pool allocation, IPv6, cross-AZ mobility, and ENI lifecycle management are not
 implemented.

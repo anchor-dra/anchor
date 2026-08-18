@@ -16,6 +16,8 @@ type PathSpec struct {
 	Name           string      `json:"name" yaml:"name"`
 	SubnetID       string      `json:"subnetId" yaml:"subnetId"`
 	ENITagSelector TagSelector `json:"eniTagSelector" yaml:"eniTagSelector"`
+	Gateway        string      `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	Routes         []string    `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
 type DeviceClassParameters struct {
@@ -77,6 +79,30 @@ func (p *DeviceClassParameters) NormalizeAndValidate() error {
 		if len(path.ENITagSelector) == 0 {
 			return fmt.Errorf("path %q requires eniTagSelector", path.Name)
 		}
+		if (path.Gateway == "") != (len(path.Routes) == 0) {
+			return fmt.Errorf("path %q requires gateway and routes to be configured together", path.Name)
+		}
+		if path.Gateway == "" {
+			continue
+		}
+		gateway, err := netip.ParseAddr(path.Gateway)
+		if err != nil || !gateway.Is4() {
+			return fmt.Errorf("path %q has invalid IPv4 gateway %q", path.Name, path.Gateway)
+		}
+		seenRoutes := map[netip.Prefix]bool{}
+		for _, value := range path.Routes {
+			route, err := netip.ParsePrefix(value)
+			if err != nil || !route.Addr().Is4() {
+				return fmt.Errorf("path %q has invalid IPv4 route %q", path.Name, value)
+			}
+			if route != route.Masked() {
+				return fmt.Errorf("path %q route %q must be a canonical network CIDR", path.Name, value)
+			}
+			if seenRoutes[route] {
+				return fmt.Errorf("path %q has duplicate route %q", path.Name, value)
+			}
+			seenRoutes[route] = true
+		}
 	}
 	return nil
 }
@@ -108,7 +134,11 @@ func (p ClaimParameters) Validate(class DeviceClassParameters, subnetCIDRs map[s
 			return fmt.Errorf("duplicate IP %s", prefix.Addr())
 		}
 		seenIPs[prefix.Addr()] = true
-		if cidr := subnetCIDRs[path.SubnetID]; cidr != "" {
+		cidr := subnetCIDRs[path.SubnetID]
+		if path.Gateway != "" && cidr == "" {
+			return fmt.Errorf("cannot validate gateway for path %q without discovered subnet CIDR", address.Path)
+		}
+		if cidr != "" {
 			subnet, err := netip.ParsePrefix(cidr)
 			if err != nil {
 				return fmt.Errorf("invalid discovered subnet CIDR %q: %w", cidr, err)
@@ -121,6 +151,15 @@ func (p ClaimParameters) Validate(class DeviceClassParameters, subnetCIDRs map[s
 			}
 			if awsReservedIPv4(subnet, prefix.Addr()) {
 				return fmt.Errorf("address %s is reserved by AWS in subnet %s", prefix.Addr(), subnet)
+			}
+			if path.Gateway != "" {
+				gateway, _ := netip.ParseAddr(path.Gateway)
+				if !subnet.Contains(gateway) {
+					return fmt.Errorf("gateway %s is outside subnet %s for path %q", gateway, subnet, address.Path)
+				}
+				if gateway == prefix.Addr() {
+					return fmt.Errorf("gateway %s equals the claimed address for path %q", gateway, address.Path)
+				}
 			}
 		}
 	}

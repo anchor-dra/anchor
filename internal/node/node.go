@@ -133,9 +133,13 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 	}
 	subnetCIDRs := map[string]string{}
 	byName := map[string]model.ENIPath{}
+	classByName := map[string]model.PathSpec{}
 	for _, path := range paths {
 		subnetCIDRs[path.SubnetID] = path.SubnetCIDR
 		byName[path.Name] = path
+	}
+	for _, path := range class.Paths {
+		classByName[path.Name] = path
 	}
 	if err := params.Validate(class, subnetCIDRs); err != nil {
 		return kubeletplugin.PrepareResult{Err: err}
@@ -146,7 +150,8 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 		if !ok || path.Interface == "" {
 			return kubeletplugin.PrepareResult{Err: fmt.Errorf("path %q has no ready host interface", address.Path)}
 		}
-		placementPaths = append(placementPaths, model.PlacementPath{Name: path.Name, IP: address.IP, ENIID: path.ENIID, Interface: path.Interface, SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR})
+		configured := classByName[address.Path]
+		placementPaths = append(placementPaths, configuredPlacementPath(address, path, configured))
 	}
 	force := strings.EqualFold(claim.Annotations[constants.ForceStealAnnotation], "true")
 	spec := model.EndpointPlacementSpec{
@@ -175,6 +180,14 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 		return kubeletplugin.PrepareResult{Err: fmt.Errorf("wait for endpoint placement: %w", err)}
 	}
 	return kubeletplugin.PrepareResult{Devices: []kubeletplugin.Device{{Requests: []string{allocation.Request}, PoolName: allocation.Pool, DeviceName: allocation.Device}}}
+}
+
+func configuredPlacementPath(address model.AddressSpec, path model.ENIPath, configured model.PathSpec) model.PlacementPath {
+	return model.PlacementPath{
+		Name: path.Name, IP: address.IP, ENIID: path.ENIID, Interface: path.Interface,
+		SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR,
+		Gateway: configured.Gateway, Routes: append([]string(nil), configured.Routes...),
+	}
 }
 
 func (p *Plugin) UnprepareResourceClaims(_ context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {

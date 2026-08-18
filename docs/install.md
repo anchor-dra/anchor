@@ -88,6 +88,16 @@ Apply a DeviceClass, a standalone ResourceClaim, and a workload from
 `examples/aws-ip-reassign`. A replicated workload must not share one endpoint
 claim. One claim is one logical endpoint and may have at most one active pod.
 
+Routing is configured by the platform administrator on each DeviceClass path.
+Set `gateway` together with one or more `routes`; Anchor rejects partial pairs,
+invalid IPv4 values, and gateways outside the discovered subnet. The `sbr`
+plugin uses that gateway as the source-specific default for traffic explicitly
+bound to the carrier address; configured routes also record the intended peer
+CIDRs. An explicit `0.0.0.0/0` route is therefore unnecessary. Omitting both
+fields leaves the interface reachable only within its subnet. Anchor does not
+configure or advertise the corresponding DX, TGW, or VPC routes outside the
+pod.
+
 ## Upgrade
 
 1. Pull and unpack the target chart, then apply its CRDs before upgrading. Helm

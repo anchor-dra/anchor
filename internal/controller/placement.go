@@ -476,10 +476,20 @@ func (r *PlacementReconciler) updateStatus(ctx context.Context, object *unstruct
 func (r *PlacementReconciler) upsertNAD(ctx context.Context, placement *unstructured.Unstructured, claimName, claimUID string, path model.PlacementPath) error {
 	namespace := placement.GetNamespace()
 	name := NADName(claimName, path.Name)
+	address := map[string]any{"address": path.IP}
+	ipam := map[string]any{"type": "static", "addresses": []any{address}}
+	if path.Gateway != "" {
+		address["gateway"] = path.Gateway
+		routes := make([]any, 0, len(path.Routes))
+		for _, destination := range path.Routes {
+			routes = append(routes, map[string]any{"dst": destination, "gw": path.Gateway})
+		}
+		ipam["routes"] = routes
+	}
 	config := map[string]any{
 		"cniVersion": "0.3.1", "name": name,
 		"plugins": []any{
-			map[string]any{"type": "ipvlan", "master": path.Interface, "mode": "l2", "ipam": map[string]any{"type": "static", "addresses": []any{map[string]any{"address": path.IP}}}},
+			map[string]any{"type": "ipvlan", "master": path.Interface, "mode": "l2", "ipam": ipam},
 			map[string]any{"type": "sbr"},
 		},
 	}

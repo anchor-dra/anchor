@@ -29,12 +29,14 @@ type AnchorNodeInventoryStatus struct {
 }
 
 type PlacementPath struct {
-	Name       string `json:"name"`
-	IP         string `json:"ip"`
-	ENIID      string `json:"eniId"`
-	Interface  string `json:"interface"`
-	SubnetID   string `json:"subnetId"`
-	SubnetCIDR string `json:"subnetCidr"`
+	Name       string   `json:"name"`
+	IP         string   `json:"ip"`
+	ENIID      string   `json:"eniId"`
+	Interface  string   `json:"interface"`
+	SubnetID   string   `json:"subnetId"`
+	SubnetCIDR string   `json:"subnetCidr"`
+	Gateway    string   `json:"gateway,omitempty"`
+	Routes     []string `json:"routes,omitempty"`
 }
 
 type EndpointPlacementSpec struct {

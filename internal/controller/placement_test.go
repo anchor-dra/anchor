@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -477,6 +478,61 @@ func TestNADOwnerReferenceIsRepairedWithoutSpecChange(t *testing.T) {
 	owners := repaired.GetOwnerReferences()
 	if len(owners) != 1 || owners[0].UID != uid || owners[0].Kind != "EndpointPlacement" {
 		t.Fatalf("NAD owner reference was not repaired: %#v", owners)
+	}
+}
+
+func TestNADStaticIPAMRouting(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("abababab-abab-abab-abab-abababababab")
+	placement := testPlacement(t, "test", "claim-"+string(uid), uid, model.EndpointPlacementSpec{}, nil)
+	dynamicClient := testDynamicClient(placement)
+	reconciler := &PlacementReconciler{Dynamic: dynamicClient}
+
+	for _, tt := range []struct {
+		name         string
+		path         model.PlacementPath
+		wantGateway  string
+		wantRouteDst string
+	}{
+		{name: "same subnet", path: model.PlacementPath{Name: "plain", IP: "10.0.1.70/24", Interface: "ens6"}},
+		{name: "routed", path: model.PlacementPath{Name: "routed", IP: "10.0.1.71/24", Interface: "ens6", Gateway: "10.0.1.1", Routes: []string{"192.0.2.0/24"}}, wantGateway: "10.0.1.1", wantRouteDst: "192.0.2.0/24"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := reconciler.upsertNAD(ctx, placement, "endpoint", string(uid), tt.path); err != nil {
+				t.Fatal(err)
+			}
+			nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Get(ctx, NADName("endpoint", tt.path.Name), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _, _ := unstructured.NestedString(nad.Object, "spec", "config")
+			var config struct {
+				Plugins []struct {
+					IPAM struct {
+						Addresses []struct {
+							Gateway string `json:"gateway"`
+						} `json:"addresses"`
+						Routes []struct {
+							Destination string `json:"dst"`
+							Gateway     string `json:"gw"`
+						} `json:"routes"`
+					} `json:"ipam"`
+				} `json:"plugins"`
+			}
+			if err := json.Unmarshal([]byte(encoded), &config); err != nil {
+				t.Fatal(err)
+			}
+			ipam := config.Plugins[0].IPAM
+			if len(ipam.Addresses) != 1 || ipam.Addresses[0].Gateway != tt.wantGateway {
+				t.Fatalf("unexpected address gateway: %#v", ipam.Addresses)
+			}
+			if tt.wantRouteDst == "" && len(ipam.Routes) != 0 {
+				t.Fatalf("same-subnet NAD contains routes: %#v", ipam.Routes)
+			}
+			if tt.wantRouteDst != "" && (len(ipam.Routes) != 1 || ipam.Routes[0].Destination != tt.wantRouteDst || ipam.Routes[0].Gateway != tt.wantGateway) {
+				t.Fatalf("unexpected routes: %#v", ipam.Routes)
+			}
+		})
 	}
 }
 

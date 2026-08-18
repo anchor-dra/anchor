@@ -130,7 +130,28 @@ multihomed listener:
 sctp_test -H PEER_PATH_A_IP -B PEER_PATH_B_IP -P 2905 -l
 ```
 
-Then send from both claimed addresses in the pod:
+The example deliberately crosses the existing peer paths to prove off-subnet
+routing without adding more AWS resources. Verify that traffic sourced from
+path A reaches the path-B peer through `sigtran-a`, and vice versa:
+
+```bash
+kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+  ip route get 10.40.36.20 from 10.40.32.10
+kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+  ip route get 10.40.32.20 from 10.40.36.10
+```
+
+The first result must use `sigtran-a` through `10.40.32.1`; the second must use
+`sigtran-b` through `10.40.36.1`. Prove both crossed paths separately:
+
+```bash
+kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+  sctp_test -H 10.40.32.10 -P 2906 -C PEER_PATH_B_IP -p 2905 -s -x 1 -c 0
+kubectl --context rcs-staging -n anchor-e2e exec smsc-sctp -- \
+  sctp_test -H 10.40.36.10 -P 2906 -C PEER_PATH_A_IP -p 2905 -s -x 1 -c 0
+```
+
+Finally, send from both claimed addresses in the pod:
 
 ```bash
 sctp_test -H 10.40.32.10 -B 10.40.36.10 -P 2906 \
@@ -213,7 +234,8 @@ Record the following evidence under ignored `.work/evidence/`:
 - ResourceClaim allocation and ResourceSlices
 - EndpointPlacement, EndpointOwnership, owner-reference, and Kubernetes event
   state before and after claim and namespace recreation
-- `ip -d address` and policy routes inside the pod
+- `ip -d address`, policy routes, and both crossed off-subnet route lookups
+  inside the pod
 - EC2 private-IP ownership before and after rescheduling
 - SCTP association and remote-path state proving both pod addresses are bound
   without NAT
