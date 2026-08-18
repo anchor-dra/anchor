@@ -395,6 +395,54 @@ func TestStaleClaimCleanupDoesNotConflictWithRecreation(t *testing.T) {
 	}
 }
 
+func TestDeletingClaimRetainsPlacementAndNADUntilGone(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("56565656-5656-5656-5656-565656565656")
+	now := metav1.Now()
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "endpoint", Namespace: "test", UID: uid, DeletionTimestamp: &now,
+		Finalizers: []string{"test.anchordra.co/hold"},
+	}}
+	path := model.PlacementPath{Name: "a", IP: "10.0.1.25/24", ENIID: "eni-old", Interface: "ens6", SubnetID: "subnet-a"}
+	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-old", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{path}}
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
+	nad := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "k8s.cni.cncf.io/v1", "kind": "NetworkAttachmentDefinition",
+		"metadata": map[string]any{
+			"name": NADName(claim.Name, path.Name), "namespace": claim.Namespace,
+			"labels": map[string]any{constants.DriverName + "/claim-uid": string(uid)},
+		},
+		"spec": map[string]any{"config": "existing"},
+	}}
+	dynamicClient := testDynamicClient(placement)
+	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Create(ctx, nad, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: &recordingStrategy{}}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{}); err != nil {
+		t.Fatalf("terminating claim lost its placement: %v", err)
+	}
+	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Get(ctx, nad.GetName(), metav1.GetOptions{}); err != nil {
+		t.Fatalf("terminating claim lost its NAD: %v", err)
+	}
+
+	reconciler.Core = fake.NewSimpleClientset()
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("gone claim retained its placement: %v", err)
+	}
+	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Get(ctx, nad.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("gone claim retained its NAD: %v", err)
+	}
+}
+
 func TestEstablishedOwnerWinsLiveDuplicate(t *testing.T) {
 	ctx := context.Background()
 	address := "10.0.1.30/24"

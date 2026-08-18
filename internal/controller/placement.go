@@ -179,10 +179,13 @@ func (r *PlacementReconciler) loadLive(ctx context.Context) ([]livePlacement, ma
 			continue
 		}
 		claim := claimsByUID[object.GetNamespace()+"/"+claimUID]
-		if claim == nil || claim.DeletionTimestamp != nil {
+		if claim == nil {
 			if err := r.cleanupStalePlacement(ctx, object, claimUID); err != nil {
 				r.Logger.Error("stale placement cleanup failed", "namespace", object.GetNamespace(), "name", object.GetName(), "error", err)
 			}
+			continue
+		}
+		if claim.DeletionTimestamp != nil {
 			continue
 		}
 		if err := r.ensurePlacementOwnerReference(ctx, object, claim); err != nil {
