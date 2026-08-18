@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type Endpoint struct {

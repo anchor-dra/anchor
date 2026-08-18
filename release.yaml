@@ -1,8 +1,17 @@
-apiVersion: anchor.dra.example.com/v1alpha1
+apiVersion: dra.anchordra.co/v1alpha1
 kind: AnchorRelease
 metadata:
+  name: anchor-dra
   version: 0.1.0
 spec:
+  identity:
+    project: Anchor DRA
+    githubProject: anchor-dra
+    repository: anchor
+    goModule: github.com/anchor-dra/anchor
+    domain: anchordra.co
+    apiGroup: dra.anchordra.co
+    driver: dra.anchordra.co
   kubernetes:
     minimumVersion: 1.34.0
     testedVersion: 1.34.7

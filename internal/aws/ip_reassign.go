@@ -9,8 +9,8 @@ import (
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	anchormetrics "example.com/anchor/internal/metrics"
-	"example.com/anchor/internal/model"
+	anchormetrics "github.com/anchor-dra/anchor/internal/metrics"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type EC2API interface {

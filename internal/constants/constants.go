@@ -1,8 +1,8 @@
 package constants
 
 const (
-	DriverName           = "anchor.dra.example.com"
-	APIGroup             = "anchor.dra.example.com"
+	DriverName           = "dra.anchordra.co"
+	APIGroup             = "dra.anchordra.co"
 	APIVersion           = "v1alpha1"
 	SystemNamespace      = "anchor-system"
 	ForceStealAnnotation = DriverName + "/force-steal"

@@ -1,4 +1,4 @@
-module example.com/anchor
+module github.com/anchor-dra/anchor
 
 go 1.24.0
 

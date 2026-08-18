@@ -13,9 +13,9 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 
-	anchoraws "example.com/anchor/internal/aws"
-	anchorkube "example.com/anchor/internal/kube"
-	"example.com/anchor/internal/model"
+	anchoraws "github.com/anchor-dra/anchor/internal/aws"
+	anchorkube "github.com/anchor-dra/anchor/internal/kube"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type partialStrategy struct {
@@ -40,7 +40,7 @@ func TestPartialPlacementRetainsSuccessfulPath(t *testing.T) {
 		Status:     resourceapi.ResourceClaimStatus{ReservedFor: []resourceapi.ResourceClaimConsumerReference{{Resource: "pods", Name: "pod", UID: types.UID("pod-uid")}}},
 	}
 	placement := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "anchor.dra.example.com/v1alpha1", "kind": "EndpointPlacement",
+		"apiVersion": "dra.anchordra.co/v1alpha1", "kind": "EndpointPlacement",
 		"metadata": map[string]any{"name": "claim-" + string(uid), "namespace": "test", "generation": int64(1)},
 	}}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{{Name: "a", IP: "10.0.1.10/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a"}, {Name: "b", IP: "10.0.2.10/24", ENIID: "eni-b", Interface: "ens7", SubnetID: "subnet-b"}}}
@@ -70,7 +70,7 @@ func TestUnreservedClaimRetainsPreviousPlacement(t *testing.T) {
 	}
 	path := model.PlacementPath{Name: "a", IP: "10.0.1.10/24", ENIID: "eni-old", Interface: "ens6", SubnetID: "subnet-a"}
 	placement := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "anchor.dra.example.com/v1alpha1", "kind": "EndpointPlacement",
+		"apiVersion": "dra.anchordra.co/v1alpha1", "kind": "EndpointPlacement",
 		"metadata": map[string]any{"name": "claim-" + string(uid), "namespace": "test", "generation": int64(2)},
 	}}
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-b", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}

@@ -3,7 +3,7 @@ package node
 import (
 	"testing"
 
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 func TestResourcesRequireReadyMappedPaths(t *testing.T) {
@@ -15,11 +15,11 @@ func TestResourcesRequireReadyMappedPaths(t *testing.T) {
 		t.Fatalf("unexpected resources: %#v", resources)
 	}
 	for _, device := range pool.Slices[0].Devices {
-		profile := device.Attributes["anchor.dra.example.com/profile"]
+		profile := device.Attributes["dra.anchordra.co/profile"]
 		if profile.StringValue == nil || *profile.StringValue != "dual" {
 			t.Fatalf("missing profile attribute: %#v", device)
 		}
-		availabilityZone := device.Attributes["anchor.dra.example.com/availability_zone"]
+		availabilityZone := device.Attributes["dra.anchordra.co/availability_zone"]
 		if availabilityZone.StringValue == nil || *availabilityZone.StringValue != "eu-west-1a" {
 			t.Fatalf("missing availability-zone attribute: %#v", device)
 		}

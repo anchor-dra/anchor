@@ -79,7 +79,7 @@ account owner has assigned a specific API budget to Anchor.
 Label only nodes whose carrier substrate is intentionally managed:
 
 ```bash
-kubectl label node NODE_NAME anchor.dra.example.com/enabled=true
+kubectl label node NODE_NAME dra.anchordra.co/enabled=true
 ```
 
 Apply a DeviceClass, a standalone ResourceClaim, and a workload from

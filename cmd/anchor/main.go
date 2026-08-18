@@ -19,12 +19,12 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
-	anchoraws "example.com/anchor/internal/aws"
-	"example.com/anchor/internal/constants"
-	"example.com/anchor/internal/controller"
-	anchorkube "example.com/anchor/internal/kube"
-	"example.com/anchor/internal/node"
-	"example.com/anchor/internal/version"
+	anchoraws "github.com/anchor-dra/anchor/internal/aws"
+	"github.com/anchor-dra/anchor/internal/constants"
+	"github.com/anchor-dra/anchor/internal/controller"
+	anchorkube "github.com/anchor-dra/anchor/internal/kube"
+	"github.com/anchor-dra/anchor/internal/node"
+	"github.com/anchor-dra/anchor/internal/version"
 )
 
 func main() {

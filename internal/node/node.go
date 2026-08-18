@@ -24,9 +24,9 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 
-	"example.com/anchor/internal/constants"
-	anchorkube "example.com/anchor/internal/kube"
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/constants"
+	anchorkube "github.com/anchor-dra/anchor/internal/kube"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type Config struct {

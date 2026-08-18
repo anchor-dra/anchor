@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	anchormetrics "example.com/anchor/internal/metrics"
+	anchormetrics "github.com/anchor-dra/anchor/internal/metrics"
 )
 
 type Controller struct {

@@ -5,7 +5,7 @@ COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-    -ldflags "-s -w -X example.com/anchor/internal/version.Version=${VERSION}" \
+    -ldflags "-s -w -X github.com/anchor-dra/anchor/internal/version.Version=${VERSION}" \
     -o /out/anchor ./cmd/anchor
 
 FROM gcr.io/distroless/static-debian12:nonroot

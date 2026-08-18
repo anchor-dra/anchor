@@ -13,11 +13,11 @@ spec:
     requests:
       - name: endpoint
         exactly:
-          deviceClassName: carrier-endpoint.anchor.dra.example.com
+          deviceClassName: carrier-endpoint.dra.anchordra.co
     config:
       - requests: [endpoint]
         opaque:
-          driver: anchor.dra.example.com
+          driver: dra.anchordra.co
           parameters:
             addresses:
               - path: path-a

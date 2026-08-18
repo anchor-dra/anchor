@@ -36,7 +36,7 @@ secondary-address capacity of every carrier ENI.
 - Successful paths are retained across partial retries.
 - Unprepare is deliberately non-destructive; the next placement moves the IP.
 - Unknown address owners are never overwritten without the explicit
-  `anchor.dra.example.com/force-steal: "true"` claim annotation.
+  `dra.anchordra.co/force-steal: "true"` claim annotation.
 
 The alpha implements IPv4 and `ip-reassign` within one AZ. Route repointing,
 pool allocation, IPv6, cross-AZ mobility, and ENI lifecycle management are not

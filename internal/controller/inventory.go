@@ -16,9 +16,9 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
-	"example.com/anchor/internal/constants"
-	anchorkube "example.com/anchor/internal/kube"
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/constants"
+	anchorkube "github.com/anchor-dra/anchor/internal/kube"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type DiscoveryAPI interface {

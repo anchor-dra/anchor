@@ -5,7 +5,7 @@ import (
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 func TestInstanceID(t *testing.T) {

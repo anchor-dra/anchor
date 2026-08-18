@@ -8,7 +8,7 @@ import (
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type fakeEC2 struct {

@@ -19,11 +19,11 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
-	anchoraws "example.com/anchor/internal/aws"
-	"example.com/anchor/internal/constants"
-	anchorkube "example.com/anchor/internal/kube"
-	anchormetrics "example.com/anchor/internal/metrics"
-	"example.com/anchor/internal/model"
+	anchoraws "github.com/anchor-dra/anchor/internal/aws"
+	"github.com/anchor-dra/anchor/internal/constants"
+	anchorkube "github.com/anchor-dra/anchor/internal/kube"
+	anchormetrics "github.com/anchor-dra/anchor/internal/metrics"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 type PlacementReconciler struct {

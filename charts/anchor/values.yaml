@@ -27,7 +27,7 @@ controller:
 
 node:
   selector:
-    anchor.dra.example.com/enabled: "true"
+    dra.anchordra.co/enabled: "true"
   preparationTimeout: 45s
   refreshInterval: 2s
   resources:

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: anchor
-description: AWS static endpoint Dynamic Resource Allocation driver
+description: Anchor DRA driver for static AWS endpoints
 type: application
 version: 0.1.0
 appVersion: 0.1.0

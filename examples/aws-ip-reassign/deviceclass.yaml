@@ -1,16 +1,16 @@
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
-  name: carrier-endpoint.anchor.dra.example.com
+  name: carrier-endpoint.dra.anchordra.co
 spec:
   selectors:
     - cel:
         expression: >-
-          device.driver == "anchor.dra.example.com" &&
-          device.attributes["anchor.dra.example.com"].profile == "carrier-dual"
+          device.driver == "dra.anchordra.co" &&
+          device.attributes["dra.anchordra.co"].profile == "carrier-dual"
   config:
     - opaque:
-        driver: anchor.dra.example.com
+        driver: dra.anchordra.co
         parameters:
           strategy: ip-reassign
           profile: carrier-dual

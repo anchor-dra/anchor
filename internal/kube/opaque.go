@@ -5,8 +5,8 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 
-	"example.com/anchor/internal/constants"
-	"example.com/anchor/internal/model"
+	"github.com/anchor-dra/anchor/internal/constants"
+	"github.com/anchor-dra/anchor/internal/model"
 )
 
 func AllocationParameters(claim *resourceapi.ResourceClaim) (model.DeviceClassParameters, model.ClaimParameters, error) {

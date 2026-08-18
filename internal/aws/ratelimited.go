@@ -8,7 +8,7 @@ import (
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"golang.org/x/time/rate"
 
-	anchormetrics "example.com/anchor/internal/metrics"
+	anchormetrics "github.com/anchor-dra/anchor/internal/metrics"
 )
 
 // EC2Client is the complete AWS surface used by the controller. Wrapping this

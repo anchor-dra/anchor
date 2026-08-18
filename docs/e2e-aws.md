@@ -86,7 +86,7 @@ controller credential Secret, install the chart, and apply the examples:
 
 ```bash
 kubectl --context rcs-staging label node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
-  anchor.dra.example.com/enabled=true
+  dra.anchordra.co/enabled=true
 
 KUBECTL_CONTEXT=rcs-staging AWS_PROFILE=opsw_admin_rcs \
   hack/e2e/assume-role-secret.sh \
