@@ -62,42 +62,47 @@ Verify Kubernetes exposes `resource.k8s.io/v1`, both workers are Ready, Multus
 is available, and `multus`, `ipvlan`, `static`, and `sbr` exist in the node CNI
 binary directory.
 
-## 3. Build and install Anchor
+## 3. Install the Anchor RC
 
-Build the controller/node image and test workload image for the worker
-architecture. Import them into containerd on both endpoint workers when no
-registry is used:
+Wait for the `develop` workflow to publish the RC and make its GHCR packages
+public. Pull the chart once from the connected workstation to prove it is
+available without credentials. Only the SCTP test workload is built locally and
+imported into containerd on both endpoint workers:
 
 ```bash
-make image VERSION=0.1.0
+ANCHOR_VERSION=0.1.0-rc.1
+helm pull oci://ghcr.io/anchor-dra/charts/anchor \
+  --version "$ANCHOR_VERSION"
+
 docker build --platform linux/amd64 \
   -f hack/e2e/Dockerfile.sctp -t anchor-sctp-e2e:0.1.0 .
-docker save -o .work/anchor-images.tar \
-  anchor:0.1.0 anchor-sctp-e2e:0.1.0
+docker save -o .work/anchor-sctp-e2e.tar anchor-sctp-e2e:0.1.0
 
 ansible kube_node -i .work/hosts.ini --limit=ENDPOINT_NODES -b \
-  -m copy -a 'src=.work/anchor-images.tar dest=/tmp/anchor-images.tar mode=0600'
+  -m copy -a 'src=.work/anchor-sctp-e2e.tar dest=/tmp/anchor-sctp-e2e.tar mode=0600'
 ansible kube_node -i .work/hosts.ini --limit=ENDPOINT_NODES -b \
-  -m shell -a 'ctr -n k8s.io images import /tmp/anchor-images.tar >/dev/null'
+  -m shell -a 'ctr -n k8s.io images import /tmp/anchor-sctp-e2e.tar >/dev/null'
 ```
 
-Label only the two workers with the test carrier ENIs. Create a short-lived
-controller credential Secret, install the chart, and apply the examples:
+Label only the two workers with the test carrier ENIs. The staging
+control-plane instance profile must already carry the tag-scoped Anchor policy
+described in the IAM guide. Install the published chart with the controller on
+those control-plane nodes, then apply the examples:
 
 ```bash
 kubectl --context rcs-staging label node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
   dra.anchordra.co/enabled=true
 
-KUBECTL_CONTEXT=rcs-staging AWS_PROFILE=opsw_admin_rcs \
-  hack/e2e/assume-role-secret.sh \
-  "$(AWS_PROFILE=opsw_admin_rcs terraform -chdir=hack/e2e/aws output -raw controller_role_arn)"
-
-helm --kube-context rcs-staging upgrade --install anchor charts/anchor \
+helm --kube-context rcs-staging upgrade --install anchor \
+  oci://ghcr.io/anchor-dra/charts/anchor \
+  --version "$ANCHOR_VERSION" \
   --namespace anchor-system --create-namespace \
   --set aws.region=eu-west-1 \
-  --set aws.credentialsSecretName=anchor-aws-credentials \
-  --set image.repository=anchor --set image.tag=0.1.0 \
-  --set image.pullPolicy=IfNotPresent
+  --set aws.useInstanceProfile=true \
+  --set 'controller.nodeSelector.node-role\.kubernetes\.io/control-plane=' \
+  --set 'controller.tolerations[0].key=node-role.kubernetes.io/control-plane' \
+  --set 'controller.tolerations[0].operator=Exists' \
+  --set 'controller.tolerations[0].effect=NoSchedule'
 
 kubectl --context rcs-staging apply -f examples/aws-ip-reassign/deviceclass.yaml
 kubectl --context rcs-staging apply -f examples/aws-ip-reassign/claim.yaml

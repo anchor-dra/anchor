@@ -30,17 +30,15 @@ Attach the tag-scoped policy to the control-plane instance profile and keep the
 controller on control-plane nodes:
 
 ```bash
-helm upgrade --install anchor charts/anchor \
+helm upgrade --install anchor oci://ghcr.io/anchor-dra/charts/anchor \
+  --version 0.1.0 \
   --namespace anchor-system --create-namespace \
   --set aws.region=eu-west-1 \
   --set aws.useInstanceProfile=true \
   --set 'controller.nodeSelector.node-role\.kubernetes\.io/control-plane=' \
   --set 'controller.tolerations[0].key=node-role.kubernetes.io/control-plane' \
   --set 'controller.tolerations[0].operator=Exists' \
-  --set 'controller.tolerations[0].effect=NoSchedule' \
-  --set image.repository=anchor \
-  --set image.tag=0.1.0 \
-  --set image.pullPolicy=IfNotPresent
+  --set 'controller.tolerations[0].effect=NoSchedule'
 ```
 
 The control-plane instances must expose IMDSv2 to pod networking with response
@@ -53,13 +51,12 @@ Create the IAM OIDC provider and role described in the IAM guide, then annotate
 only the controller service account:
 
 ```bash
-helm upgrade --install anchor charts/anchor \
+helm upgrade --install anchor oci://ghcr.io/anchor-dra/charts/anchor \
+  --version 0.1.0 \
   --namespace anchor-system --create-namespace \
   --set aws.region=eu-west-1 \
   --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::ACCOUNT_ID:role/anchor-controller' \
-  --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/sts-regional-endpoints=true' \
-  --set image.repository=REGISTRY/anchor \
-  --set image.tag=0.1.0
+  --set-string 'controller.serviceAccount.annotations.eks\.amazonaws\.com/sts-regional-endpoints=true'
 ```
 
 Leave `aws.useInstanceProfile=false` and `aws.credentialsSecretName` empty for
@@ -88,12 +85,22 @@ claim. One claim is one logical endpoint and may have at most one active pod.
 
 ## Upgrade
 
-1. Keep the controller running and upgrade the chart with the new immutable
-   image tag.
-2. Wait for both controller replicas and the node DaemonSet rollout.
-3. Confirm existing EndpointPlacements remain `Ready` and ResourceSlices still
+1. Pull and unpack the target chart, then apply its CRDs before upgrading. Helm
+   installs CRDs but deliberately does not upgrade them:
+
+   ```bash
+   helm pull oci://ghcr.io/anchor-dra/charts/anchor \
+     --version TARGET_VERSION --untar --untardir /tmp
+   kubectl apply -f /tmp/anchor/crds
+   ```
+
+2. Keep the controller running and repeat the applicable install command with
+   `--version TARGET_VERSION`. The chart selects the matching immutable image
+   tag through its `appVersion`.
+3. Wait for both controller replicas and the node DaemonSet rollout.
+4. Confirm existing EndpointPlacements remain `Ready` and ResourceSlices still
    advertise the expected slots.
-4. Restart endpoint workloads only after that validation.
+5. Restart endpoint workloads only after that validation.
 
 The CRDs and AWS placements survive `helm uninstall`. Uninstalling the chart
 does not unassign carrier addresses. Inspect `EndpointPlacement` objects and

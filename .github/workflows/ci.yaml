@@ -1,15 +1,20 @@
-name: CI
+name: CI and release
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [develop, main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  validate:
+    name: Validate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +31,213 @@ jobs:
       - run: terraform -chdir=hack/e2e/aws init -backend=false
       - run: ./scripts/check.sh
       - run: make image VERSION=ci
+
+  release:
+    name: Publish semantic release
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_version=$(awk '
+            /^metadata:$/ { in_metadata=1; next }
+            in_metadata && /^  version:/ { print $2; exit }
+          ' release.yaml)
+          chart_version=$(awk '$1 == "version:" { print $2; exit }' charts/anchor/Chart.yaml)
+          app_version=$(awk '$1 == "appVersion:" { print $2; exit }' charts/anchor/Chart.yaml)
+
+          if [[ -z "$metadata_version" || "$metadata_version" != "$chart_version" || "$metadata_version" != "$app_version" ]]; then
+            echo "release.yaml metadata.version, chart version, and appVersion must match" >&2
+            exit 1
+          fi
+
+          latest_stable=$(git tag --list 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -n1 || true)
+
+          if [[ "$GITHUB_REF_NAME" == develop ]]; then
+            previous_tag="$latest_stable"
+            prerelease="true"
+            channel_tag="rc-latest"
+
+            if [[ -z "$latest_stable" ]]; then
+              base_version="$metadata_version"
+              echo "No stable tag exists; bootstrapping v$base_version from release metadata"
+            else
+              git log "$latest_stable"..HEAD --format='%s' > /tmp/anchor-subjects
+              git log "$latest_stable"..HEAD --format='%b' > /tmp/anchor-bodies
+
+              bump=""
+              if grep -Eq '^[[:alnum:]_-]+(\([^)]*\))?!:' /tmp/anchor-subjects \
+                || grep -Eq '^BREAKING CHANGE:' /tmp/anchor-bodies; then
+                bump="major"
+              elif grep -Eq '^feat(\([^)]*\))?:' /tmp/anchor-subjects; then
+                bump="minor"
+              elif grep -Eq '^(fix|perf)(\([^)]*\))?:' /tmp/anchor-subjects; then
+                bump="patch"
+              fi
+
+              if [[ -z "$bump" ]]; then
+                echo "No releasable conventional commit since $latest_stable"
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              stable_version=${latest_stable#v}
+              IFS=. read -r major minor patch <<< "$stable_version"
+              case "$bump" in
+                major) base_version="$((major + 1)).0.0" ;;
+                minor) base_version="$major.$((minor + 1)).0" ;;
+                patch) base_version="$major.$minor.$((patch + 1))" ;;
+              esac
+            fi
+
+            latest_rc=$(git tag --list "v${base_version}-rc.*" --sort=-v:refname | head -n1 || true)
+            if [[ -n "$latest_rc" && "$(git rev-list -n1 "$latest_rc")" == "$GITHUB_SHA" ]]; then
+              echo "$latest_rc already points to this commit; nothing to publish"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [[ -n "$latest_rc" ]]; then
+              rc_number=${latest_rc##*.}
+              rc_number=$((rc_number + 1))
+            else
+              rc_number=1
+            fi
+            version="${base_version}-rc.${rc_number}"
+            tag="v$version"
+          elif [[ "$GITHUB_REF_NAME" == main ]]; then
+            prerelease="false"
+            channel_tag="latest"
+            matching_rc=""
+            while IFS= read -r candidate; do
+              if git diff --quiet "$candidate^{tree}" "HEAD^{tree}"; then
+                matching_rc="$candidate"
+                break
+              fi
+            done < <(git tag --list 'v*-rc.*' --sort=-v:refname)
+
+            if [[ -z "$matching_rc" ]]; then
+              echo "main must exactly match a tested develop RC before a stable release" >&2
+              exit 1
+            fi
+
+            version=${matching_rc#v}
+            version=${version%-rc.*}
+            tag="v$version"
+            previous_tag="$latest_stable"
+          else
+            echo "Unsupported release branch: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "publish=true"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "previous_tag=$previous_tag"
+            echo "prerelease=$prerelease"
+            echo "channel_tag=$channel_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag"
+
+      - uses: azure/setup-helm@v4
+        if: steps.version.outputs.publish == 'true'
+        with:
+          version: v3.17.3
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.version.outputs.publish == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.version.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          CHANNEL_TAG: ${{ steps.version.outputs.channel_tag }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg VERSION="$VERSION" \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:sha-${GITHUB_SHA}" \
+            --tag "$IMAGE:$CHANNEL_TAG" \
+            --push .
+
+      - name: Package and publish Helm chart
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          helm package charts/anchor \
+            --destination dist \
+            --version "$VERSION" \
+            --app-version "$VERSION"
+          helm push "dist/anchor-$VERSION.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+      - name: Prepare release metadata
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v version="$VERSION" '
+            !updated && /^  version:/ {
+              print "  version: " version
+              updated=1
+              next
+            }
+            { print }
+          ' release.yaml > dist/release.yaml
+          (cd dist && sha256sum "anchor-$VERSION.tgz" release.yaml > SHA256SUMS)
+
+      - name: Create GitHub release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          notes_args=(--generate-notes)
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            notes_args+=(--notes-start-tag "$PREVIOUS_TAG")
+          fi
+          if [[ "$PRERELEASE" == true ]]; then
+            notes_args+=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Anchor DRA $TAG" \
+            "${notes_args[@]}" \
+            "dist/anchor-$VERSION.tgz" \
+            dist/release.yaml \
+            dist/SHA256SUMS

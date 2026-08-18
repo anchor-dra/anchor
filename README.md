@@ -18,4 +18,4 @@ Project identity is fixed before the first release:
 - API group and DRA driver: `dra.anchordra.co`
 
 See [the architecture](docs/architecture.md), [installation guide](docs/install.md),
-and [AWS staging test](docs/e2e-aws.md).
+[release process](docs/releasing.md), and [AWS staging test](docs/e2e-aws.md).

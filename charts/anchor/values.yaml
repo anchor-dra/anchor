@@ -1,6 +1,7 @@
 image:
-  repository: anchor
-  tag: "0.1.0"
+  repository: ghcr.io/anchor-dra/anchor
+  # Defaults to the chart appVersion. Override only for development builds.
+  tag: ""
   pullPolicy: IfNotPresent
 
 aws:
