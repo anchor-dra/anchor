@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,10 +28,11 @@ import (
 )
 
 type PlacementReconciler struct {
-	Core     kubernetes.Interface
-	Dynamic  dynamic.Interface
-	Strategy anchoraws.BatchPlacementStrategy
-	Logger   *slog.Logger
+	Core         kubernetes.Interface
+	Dynamic      dynamic.Interface
+	Strategy     anchoraws.BatchPlacementStrategy
+	StrategyName string
+	Logger       *slog.Logger
 }
 
 type livePlacement struct {
@@ -343,7 +342,13 @@ func derivePlacement(claim *resourceapi.ResourceClaim, pod *corev1.Pod, inventor
 	configuredByName := make(map[string]model.PathSpec, len(class.Paths))
 	for _, configured := range class.Paths {
 		path, found := authoritative[configured.Name]
-		if !found || path.SubnetID != configured.SubnetID || !model.TagsMatch(path.Tags, configured.ENITagSelector) {
+		matches := found
+		if class.Strategy == model.StrategyL2Announce {
+			matches = matches && path.Interface == configured.ParentInterface && path.SubnetCIDR == configured.SubnetCIDR
+		} else {
+			matches = matches && path.SubnetID == configured.SubnetID && model.TagsMatch(path.Tags, configured.ENITagSelector)
+		}
+		if !matches {
 			return result, fmt.Errorf("path %q inventory does not match its allocated DeviceClass", configured.Name)
 		}
 		configuredByName[configured.Name] = configured
@@ -359,6 +364,7 @@ func derivePlacement(claim *resourceapi.ResourceClaim, pod *corev1.Pod, inventor
 			return result, fmt.Errorf("path %q is missing from controller inventory", address.Path)
 		}
 		path.Interface = mapped[address.Path].Interface
+		path.MAC = mapped[address.Path].MAC
 		paths = append(paths, model.BuildPlacementPath(address, path, configuredByName[address.Path]))
 	}
 	result = model.EndpointPlacementSpec{
@@ -407,9 +413,16 @@ func trustedInventoryPaths(inventory *placementInventory, profile string) (map[s
 			return nil, nil, fmt.Errorf("profile %q has an invalid or duplicate node interface mapping", profile)
 		}
 		expected, found := authoritative[path.Name]
-		withoutInterface := path
-		withoutInterface.Interface = ""
-		if !found || !reflect.DeepEqual(withoutInterface, expected) {
+		reported := path
+		if expected.Interface == "" {
+			reported.Interface = ""
+		} else {
+			if reported.Interface != expected.Interface || reported.MAC == "" {
+				return nil, nil, fmt.Errorf("node-reported path %q does not match the approved host parent", path.Name)
+			}
+			reported.MAC = ""
+		}
+		if !found || !reflect.DeepEqual(reported, expected) {
 			return nil, nil, fmt.Errorf("node-reported path %q does not match controller inventory", path.Name)
 		}
 		mapped[path.Name] = path
@@ -433,6 +446,13 @@ func (r *PlacementReconciler) prepareWork(ctx context.Context, placement *livePl
 	}
 	if len(placement.claim.Status.ReservedFor) != 1 {
 		return nil, fmt.Errorf("claim must have exactly one active pod reservation, found %d", len(placement.claim.Status.ReservedFor))
+	}
+	strategyName := r.StrategyName
+	if strategyName == "" {
+		strategyName = model.StrategyIPReassign
+	}
+	if placement.spec.Strategy != strategyName {
+		return nil, fmt.Errorf("placement strategy %q is not enabled by this controller", placement.spec.Strategy)
 	}
 	ownerships, err := r.reserveOwnerships(ctx, placement.object.GetNamespace(), placement.spec)
 	if err != nil {
@@ -482,9 +502,6 @@ func (r *PlacementReconciler) executeWorks(ctx context.Context, works []*placeme
 			ip, _ := ownershipAddress(endpoint.Path)
 			if pathErr == nil {
 				pathErr = r.markOwnershipPlaced(ctx, work.ownerships[ip], work.live.object.GetNamespace(), work.live.spec, endpoint.Path)
-			}
-			if pathErr == nil {
-				pathErr = r.upsertNAD(ctx, work.live.object, work.live.spec.ClaimName, work.live.spec.ClaimUID, endpoint.Path)
 			}
 			if pathErr != nil {
 				if firstErr == nil {
@@ -576,14 +593,6 @@ func claimOwnerReference(claim *resourceapi.ResourceClaim) metav1.OwnerReference
 	}
 }
 
-func placementOwnerReference(placement *unstructured.Unstructured) metav1.OwnerReference {
-	controller := true
-	return metav1.OwnerReference{
-		APIVersion: constants.APIGroup + "/" + constants.APIVersion, Kind: "EndpointPlacement",
-		Name: placement.GetName(), UID: placement.GetUID(), Controller: &controller,
-	}
-}
-
 func (r *PlacementReconciler) ensurePlacementOwnerReference(ctx context.Context, object *unstructured.Unstructured, claim *resourceapi.ResourceClaim) error {
 	desired := []metav1.OwnerReference{claimOwnerReference(claim)}
 	if reflect.DeepEqual(object.GetOwnerReferences(), desired) {
@@ -600,17 +609,8 @@ func (r *PlacementReconciler) ensurePlacementOwnerReference(ctx context.Context,
 }
 
 func (r *PlacementReconciler) cleanupStalePlacement(ctx context.Context, object *unstructured.Unstructured, claimUID string) error {
-	selector := constants.DriverName + "/claim-uid=" + claimUID
-	nads, err := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(object.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("list stale NetworkAttachmentDefinitions: %w", err)
-	}
-	if err == nil {
-		for i := range nads.Items {
-			if err := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(object.GetNamespace()).Delete(ctx, nads.Items[i].GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("delete stale NetworkAttachmentDefinition %s: %w", nads.Items[i].GetName(), err)
-			}
-		}
+	if claimUID == "" {
+		return fmt.Errorf("stale EndpointPlacement has no claim UID")
 	}
 	return r.deletePlacement(ctx, object)
 }
@@ -660,6 +660,13 @@ func (r *PlacementReconciler) failWithPaths(ctx context.Context, object *unstruc
 }
 
 func (r *PlacementReconciler) updateStatus(ctx context.Context, object *unstructured.Unstructured, status model.EndpointPlacementStatus) error {
+	if status.Injection == nil {
+		var previous model.EndpointPlacementStatus
+		if currentRaw, found, _ := unstructured.NestedMap(object.Object, "status"); found {
+			_ = runtime.DefaultUnstructuredConverter.FromUnstructured(currentRaw, &previous)
+			status.Injection = previous.Injection
+		}
+	}
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
 	if err != nil {
 		return err
@@ -672,67 +679,6 @@ func (r *PlacementReconciler) updateStatus(ctx context.Context, object *unstruct
 	copy.Object["status"] = raw
 	_, err = r.Dynamic.Resource(anchorkube.PlacementGVR).Namespace(object.GetNamespace()).UpdateStatus(ctx, copy, metav1.UpdateOptions{})
 	return err
-}
-
-func (r *PlacementReconciler) upsertNAD(ctx context.Context, placement *unstructured.Unstructured, claimName, claimUID string, path model.PlacementPath) error {
-	namespace := placement.GetNamespace()
-	name := NADName(claimName, path.Name)
-	address := map[string]any{"address": path.IP}
-	ipam := map[string]any{"type": "static", "addresses": []any{address}}
-	if path.Gateway != "" {
-		address["gateway"] = path.Gateway
-		routes := make([]any, 0, len(path.Routes))
-		for _, destination := range path.Routes {
-			routes = append(routes, map[string]any{"dst": destination, "gw": path.Gateway})
-		}
-		ipam["routes"] = routes
-	}
-	config := map[string]any{
-		"cniVersion": "0.3.1", "name": name,
-		"plugins": []any{
-			map[string]any{"type": "ipvlan", "master": path.Interface, "mode": "l2", "ipam": ipam},
-			map[string]any{"type": "sbr"},
-		},
-	}
-	encoded, err := json.Marshal(config)
-	if err != nil {
-		return err
-	}
-	desired := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "k8s.cni.cncf.io/v1", "kind": "NetworkAttachmentDefinition",
-		"metadata": map[string]any{"name": name, "namespace": namespace, "labels": map[string]any{constants.DriverName + "/claim-uid": claimUID}},
-		"spec":     map[string]any{"config": string(encoded)},
-	}}
-	desired.SetOwnerReferences([]metav1.OwnerReference{placementOwnerReference(placement)})
-	resource := r.Dynamic.Resource(anchorkube.NADGVR).Namespace(namespace)
-	current, err := resource.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = resource.Create(ctx, desired, metav1.CreateOptions{})
-		return err
-	}
-	if err != nil {
-		return err
-	}
-	oldSpec, _, _ := unstructured.NestedMap(current.Object, "spec")
-	if reflect.DeepEqual(oldSpec, desired.Object["spec"]) &&
-		reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) &&
-		reflect.DeepEqual(current.GetOwnerReferences(), desired.GetOwnerReferences()) {
-		return nil
-	}
-	current.Object["spec"] = desired.Object["spec"]
-	current.SetLabels(desired.GetLabels())
-	current.SetOwnerReferences(desired.GetOwnerReferences())
-	_, err = resource.Update(ctx, current, metav1.UpdateOptions{})
-	return err
-}
-
-func NADName(claimName, path string) string {
-	name := model.SafeName("anchor", claimName, path)
-	if len(name) <= 63 {
-		return name
-	}
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(name)))[:8]
-	return strings.Trim(name[:54], "-") + "-" + hash
 }
 
 func placementPaths(values map[string]model.PlacementPath) []model.PlacementPath {

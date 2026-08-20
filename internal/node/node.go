@@ -13,6 +13,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,10 @@ type Config struct {
 	PluginsDir         string
 	PreparationTimeout time.Duration
 	RefreshInterval    time.Duration
+	ReconcileInterval  time.Duration
+	PlanGCInterval     time.Duration
+	StateDir           string
+	NRISocketPath      string
 }
 
 type Plugin struct {
@@ -44,6 +49,8 @@ type Plugin struct {
 	dynamic dynamic.Interface
 	helper  *kubeletplugin.Helper
 	logger  *slog.Logger
+	store   *PlanStore
+	nri     *NRIPlugin
 }
 
 func Run(ctx context.Context, config Config, core kubernetes.Interface, dynamicClient dynamic.Interface, logger *slog.Logger) error {
@@ -62,6 +69,15 @@ func Run(ctx context.Context, config Config, core kubernetes.Interface, dynamicC
 	if config.RefreshInterval <= 0 {
 		config.RefreshInterval = 2 * time.Second
 	}
+	if config.ReconcileInterval <= 0 {
+		config.ReconcileInterval = 30 * time.Second
+	}
+	if config.PlanGCInterval <= 0 {
+		config.PlanGCInterval = 5 * time.Minute
+	}
+	if config.StateDir == "" {
+		config.StateDir = "/var/lib/anchor/plans"
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -69,7 +85,15 @@ func Run(ctx context.Context, config Config, core kubernetes.Interface, dynamicC
 	if err := os.MkdirAll(pluginDataDir, 0o750); err != nil {
 		return fmt.Errorf("create DRA plugin data directory: %w", err)
 	}
-	plugin := &Plugin{config: config, core: core, dynamic: dynamicClient, logger: logger}
+	store, err := NewPlanStore(config.StateDir)
+	if err != nil {
+		return err
+	}
+	injector := &IPvlanInjector{Store: store}
+	nriPlugin := NewNRIPlugin(core, dynamicClient, store, injector, logger)
+	plugin := &Plugin{config: config, core: core, dynamic: dynamicClient, logger: logger, store: store, nri: nriPlugin}
+	nriErrors := make(chan error, 1)
+	go func() { nriErrors <- nriPlugin.Run(ctx, config.NRISocketPath) }()
 	helper, err := kubeletplugin.Start(ctx, plugin,
 		kubeletplugin.KubeClient(core),
 		kubeletplugin.NodeName(config.NodeName),
@@ -89,15 +113,29 @@ func Run(ctx context.Context, config Config, core kubernetes.Interface, dynamicC
 		_ = helper.PublishResources(ctx, emptyResources(config.NodeName))
 	}
 	ticker := time.NewTicker(config.RefreshInterval)
+	reconcileTicker := time.NewTicker(config.ReconcileInterval)
+	gcTicker := time.NewTicker(config.PlanGCInterval)
 	defer ticker.Stop()
+	defer reconcileTicker.Stop()
+	defer gcTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-nriErrors:
+			return fmt.Errorf("run NRI plugin: %w", err)
 		case <-ticker.C:
 			if err := plugin.refreshInventory(ctx); err != nil {
 				logger.Warn("inventory refresh failed", "error", err)
 				_ = helper.PublishResources(ctx, emptyResources(config.NodeName))
+			}
+		case <-reconcileTicker.C:
+			if err := plugin.nri.Reconcile(ctx); err != nil {
+				logger.Error("periodic pod network reconciliation failed", "error", err)
+			}
+		case <-gcTicker.C:
+			if err := plugin.gcRetainedPlans(ctx); err != nil {
+				logger.Error("retained network plan garbage collection failed", "error", err)
 			}
 		}
 	}
@@ -112,12 +150,15 @@ func (p *Plugin) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 }
 
 func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	if p.nri == nil || !p.nri.Healthy() {
+		return kubeletplugin.PrepareResult{Err: errors.New("Anchor NRI plugin is not synchronized")}
+	}
 	class, params, err := anchorkube.AllocationParameters(claim)
 	if err != nil {
 		return kubeletplugin.PrepareResult{Err: err}
 	}
-	if len(claim.Status.ReservedFor) > 1 {
-		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has %d consumers; anchor permits one", claim.Namespace, claim.Name, len(claim.Status.ReservedFor))}
+	if len(claim.Status.ReservedFor) != 1 {
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has %d consumers; Anchor requires exactly one", claim.Namespace, claim.Name, len(claim.Status.ReservedFor))}
 	}
 	allocation, err := anchorkube.AllocationForDriver(claim)
 	if err != nil {
@@ -159,9 +200,31 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
 		Strategy: class.Strategy, ForceSteal: force, Paths: placementPaths,
 	}
-	generation, err := p.upsertPlacement(ctx, claim, "claim-"+string(claim.UID), spec)
+	reservation := claim.Status.ReservedFor[0]
+	if reservation.APIGroup != "" || reservation.Resource != "pods" || reservation.UID == "" {
+		return kubeletplugin.PrepareResult{Err: errors.New("claim reservation must identify one core Pod UID")}
+	}
+	pod, err := p.core.CoreV1().Pods(claim.Namespace).Get(ctx, reservation.Name, metav1.GetOptions{})
+	if err != nil || pod.UID != reservation.UID || pod.Spec.NodeName != p.config.NodeName {
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim reservation does not match a pod on node %s", p.config.NodeName)}
+	}
+	placementName := "claim-" + string(claim.UID)
+	plan := PodNetworkPlan{
+		Version: 1, PodNamespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID),
+		ClaimNamespace: claim.Namespace, ClaimName: claim.Name, ClaimUID: string(claim.UID),
+		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
+		PlacementName: placementName, Strategy: class.Strategy, Paths: placementPaths, Phase: PlanPrepared,
+	}
+	if err := p.store.Save(plan); err != nil {
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("persist pod network plan: %w", err)}
+	}
+	generation, err := p.upsertPlacement(ctx, claim, placementName, spec)
 	if err != nil {
 		return kubeletplugin.PrepareResult{Err: err}
+	}
+	plan.PlacementGeneration = generation
+	if err := p.store.Save(plan); err != nil {
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("persist placement generation: %w", err)}
 	}
 	err = wait.PollUntilContextTimeout(ctx, time.Second, p.config.PreparationTimeout, true, func(ctx context.Context) (bool, error) {
 		object, err := p.dynamic.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, "claim-"+string(claim.UID), metav1.GetOptions{})
@@ -179,13 +242,58 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 	if err != nil {
 		return kubeletplugin.PrepareResult{Err: fmt.Errorf("wait for endpoint placement: %w", err)}
 	}
+	plan.Phase = PlanInjectionPending
+	if err := p.store.Save(plan); err != nil {
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("persist pending injection: %w", err)}
+	}
 	return kubeletplugin.PrepareResult{Devices: []kubeletplugin.Device{{Requests: []string{allocation.Request}, PoolName: allocation.Pool, DeviceName: allocation.Device}}}
+}
+
+func (p *Plugin) gcRetainedPlans(ctx context.Context) error {
+	plans, planErrors, err := p.store.LoadAllLenient()
+	if err != nil {
+		return err
+	}
+	errs := append([]error(nil), planErrors...)
+	for _, plan := range plans {
+		if plan.Phase != PlanRetained {
+			continue
+		}
+		claim, getErr := p.core.ResourceV1().ResourceClaims(plan.ClaimNamespace).Get(ctx, plan.ClaimName, metav1.GetOptions{})
+		if getErr == nil && string(claim.UID) == plan.ClaimUID {
+			continue
+		}
+		if getErr != nil && !apierrors.IsNotFound(getErr) {
+			errs = append(errs, fmt.Errorf("check retained claim %s/%s: %w", plan.ClaimNamespace, plan.ClaimName, getErr))
+			continue
+		}
+		if deleteErr := p.store.Delete(plan.ClaimUID); deleteErr != nil {
+			errs = append(errs, deleteErr)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (p *Plugin) UnprepareResourceClaims(_ context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	result := make(map[types.UID]error, len(claims))
 	for _, claim := range claims {
-		result[claim.UID] = nil
+		plan, err := p.store.Get(string(claim.UID))
+		if os.IsNotExist(err) {
+			result[claim.UID] = nil
+			continue
+		}
+		if err != nil {
+			result[claim.UID] = err
+			continue
+		}
+		plan.Phase = PlanUnpreparing
+		if err := p.store.Save(*plan); err != nil {
+			result[claim.UID] = err
+			continue
+		}
+		plan.Phase = PlanRetained
+		plan.NetworkNamespace = ""
+		result[claim.UID] = p.store.Save(*plan)
 	}
 	return result, nil
 }
@@ -275,19 +383,28 @@ func (p *Plugin) refreshInventory(ctx context.Context) error {
 		return fmt.Errorf("list host network links: %w", err)
 	}
 	byMAC := map[string]netlink.Link{}
+	byName := map[string]netlink.Link{}
 	for _, link := range links {
+		byName[link.Attrs().Name] = link
 		if link.Attrs().HardwareAddr != nil {
 			byMAC[strings.ToLower(link.Attrs().HardwareAddr.String())] = link
 		}
 	}
 	status := model.AnchorNodeInventoryStatus{Ready: true, ObservedGeneration: object.GetGeneration(), Interfaces: map[string][]model.ENIPath{}}
+	if p.nri == nil || !p.nri.Healthy() {
+		status.Ready = false
+		status.Message = "Anchor NRI plugin is not registered and synchronized"
+	}
 	for profile, paths := range spec.Profiles {
 		mapped := make([]model.ENIPath, 0, len(paths))
 		for _, path := range paths {
 			link := byMAC[strings.ToLower(path.MAC)]
+			if path.Interface != "" {
+				link = byName[path.Interface]
+			}
 			if link == nil {
 				status.Ready = false
-				status.Message = fmt.Sprintf("ENI %s (%s) is not present in the host network namespace", path.ENIID, path.MAC)
+				status.Message = fmt.Sprintf("approved parent %s (%s) is not present in the host network namespace", path.ENIID, path.Interface)
 				continue
 			}
 			if err := netlink.LinkSetUp(link); err != nil {
@@ -296,6 +413,18 @@ func (p *Plugin) refreshInventory(ctx context.Context) error {
 				continue
 			}
 			path.Interface = link.Attrs().Name
+			if link.Attrs().HardwareAddr == nil {
+				status.Ready = false
+				status.Message = fmt.Sprintf("approved parent %s has no hardware address", path.Interface)
+				continue
+			}
+			actualMAC := strings.ToLower(link.Attrs().HardwareAddr.String())
+			if path.MAC != "" && strings.ToLower(path.MAC) != actualMAC {
+				status.Ready = false
+				status.Message = fmt.Sprintf("approved parent %s MAC changed from %s to %s", path.Interface, path.MAC, actualMAC)
+				continue
+			}
+			path.MAC = actualMAC
 			mapped = append(mapped, path)
 		}
 		if len(mapped) == len(paths) {
@@ -325,6 +454,9 @@ func (p *Plugin) refreshInventory(ctx context.Context) error {
 
 func resourcesForInventory(spec model.AnchorNodeInventorySpec, status model.AnchorNodeInventoryStatus) resourceslice.DriverResources {
 	devices := []resourceapi.Device{}
+	if !status.Ready {
+		return emptyResources(spec.NodeName)
+	}
 	for profile, paths := range status.Interfaces {
 		if len(paths) == 0 {
 			continue

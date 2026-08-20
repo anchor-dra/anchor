@@ -4,6 +4,8 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+platform: aws
+
 aws:
   region: ""
   useInstanceProfile: false
@@ -16,6 +18,7 @@ controller:
   reconcileInterval: 2s
   inventoryInterval: 60s
   driftInterval: 60s
+  readinessInterval: 5s
   nodeSelector: {}
   tolerations: []
   serviceAccount:
@@ -33,6 +36,9 @@ node:
     dra.anchordra.co/enabled: "true"
   preparationTimeout: 45s
   refreshInterval: 2s
+  networkReconcileInterval: 30s
+  planGCInterval: 5m
+  protectHostPaths: true
   resources:
     requests:
       cpu: 25m

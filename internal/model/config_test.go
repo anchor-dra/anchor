@@ -4,10 +4,10 @@ import "testing"
 
 func validClass() DeviceClassParameters {
 	return DeviceClassParameters{
-		Profile: "carrier-dual",
+		Strategy: StrategyIPReassign, Profile: "carrier-dual",
 		Paths: []PathSpec{
-			{Name: "a", SubnetID: "subnet-a", ENITagSelector: TagSelector{"path": "a"}},
-			{Name: "b", SubnetID: "subnet-b", ENITagSelector: TagSelector{"path": "b"}},
+			{Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, SubnetID: "subnet-a", ENITagSelector: TagSelector{"path": "a"}},
+			{Name: "b", InterfaceName: "sigtran-b", RoutingTable: 102, SubnetID: "subnet-b", ENITagSelector: TagSelector{"path": "b"}},
 		},
 	}
 }
@@ -17,8 +17,30 @@ func TestNormalizeAndValidate(t *testing.T) {
 	if err := class.NormalizeAndValidate(); err != nil {
 		t.Fatal(err)
 	}
-	if class.Strategy != StrategyIPReassign || class.SlotsPerNode != 1 {
+	if class.SlotsPerNode != 1 {
 		t.Fatalf("defaults not applied: %#v", class)
+	}
+}
+
+func TestL2AnnounceClassAndClaimValidation(t *testing.T) {
+	class := DeviceClassParameters{Strategy: StrategyL2Announce, Profile: "carrier-dual", Paths: []PathSpec{
+		{Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, ParentInterface: "carrier0", SubnetCIDR: "10.50.1.0/24"},
+		{Name: "b", InterfaceName: "sigtran-b", RoutingTable: 102, ParentInterface: "carrier1", SubnetCIDR: "10.50.2.0/24"},
+	}}
+	if err := class.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	claim := ClaimParameters{Addresses: []AddressSpec{{Path: "a", IP: "10.50.1.10/24"}, {Path: "b", IP: "10.50.2.10/24"}}}
+	if err := claim.Validate(class, nil); err != nil {
+		t.Fatal(err)
+	}
+	claim.Addresses[0].IP = "10.60.1.10/24"
+	if err := claim.Validate(class, nil); err == nil {
+		t.Fatal("expected an on-prem address outside the configured subnet to fail")
+	}
+	class.Paths[0].ENITagSelector = TagSelector{"unexpected": "true"}
+	if err := class.NormalizeAndValidate(); err == nil {
+		t.Fatal("expected AWS ENI fields on an l2-announce path to fail")
 	}
 }
 
@@ -92,6 +114,30 @@ func TestClaimRoutingValidation(t *testing.T) {
 	class.Paths[0].Gateway = "10.0.1.10"
 	if err := claim.Validate(class, subnets); err == nil {
 		t.Fatal("expected gateway/address conflict")
+	}
+}
+
+func TestRouteRepointClaimUsesIndependentHostRoutes(t *testing.T) {
+	class := validClass()
+	class.Strategy = StrategyRouteRepoint
+	for index := range class.Paths {
+		class.Paths[index].RouteTableIDs = []string{"rtb-carrier"}
+	}
+	class.Paths[0].Gateway = "10.0.1.1"
+	class.Paths[0].Routes = []string{"0.0.0.0/0"}
+	if err := class.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	claim := ClaimParameters{Addresses: []AddressSpec{
+		{Path: "a", IP: "198.51.100.10/32"},
+		{Path: "b", IP: "198.51.100.11/32"},
+	}}
+	if err := claim.Validate(class, map[string]string{"subnet-a": "10.0.1.0/24", "subnet-b": "10.0.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	claim.Addresses[0].IP = "198.51.100.10/24"
+	if err := claim.Validate(class, map[string]string{"subnet-a": "10.0.1.0/24", "subnet-b": "10.0.2.0/24"}); err == nil {
+		t.Fatal("expected route-repoint to reject a non-/32 address")
 	}
 }
 

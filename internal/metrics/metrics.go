@@ -21,8 +21,17 @@ var (
 	DriftDetections = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "anchor", Name: "drift_detections_total", Help: "Ready placements found to have drifted.",
 	}, []string{"strategy"})
+	Injections = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "anchor", Name: "network_injections_total", Help: "NRI network injection attempts by result.",
+	}, []string{"result"})
+	InjectionRetries = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "anchor", Name: "network_injection_retries_total", Help: "Network injection retries after an initial failure.",
+	})
+	InjectionFailureAge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "anchor", Name: "network_injection_failure_age_seconds", Help: "Age of the most recently observed persistent network injection failure.",
+	})
 )
 
 func init() {
-	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, ReconcileErrors, ReconcileDuration, DriftDetections)
+	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, ReconcileErrors, ReconcileDuration, DriftDetections, Injections, InjectionRetries, InjectionFailureAge)
 }

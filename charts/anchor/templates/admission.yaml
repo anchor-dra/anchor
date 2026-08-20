@@ -1,0 +1,48 @@
+{{- if .Values.node.protectHostPaths }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "anchor.fullname" . }}-hostpath
+  labels:
+    {{- include "anchor.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        !has(object.spec.volumes) || object.spec.volumes.all(v,
+          !has(v.hostPath) ||
+          !(v.hostPath.path == '/' ||
+            v.hostPath.path == '/var' ||
+            v.hostPath.path == '/var/run' ||
+            v.hostPath.path == '/run' ||
+            v.hostPath.path == '/var/lib' ||
+            v.hostPath.path == '/var/run/netns' || v.hostPath.path.startsWith('/var/run/netns/') ||
+            v.hostPath.path == '/var/run/nri' || v.hostPath.path.startsWith('/var/run/nri/') ||
+            v.hostPath.path == '/run/nri' || v.hostPath.path.startsWith('/run/nri/') ||
+            v.hostPath.path == '/var/lib/anchor' || v.hostPath.path.startsWith('/var/lib/anchor/')) ||
+          (object.metadata.namespace == {{ .Release.Namespace | quote }} &&
+           object.spec.serviceAccountName == {{ printf "%s-node" (include "anchor.fullname" .) | quote }}))
+      message: Only the Anchor node service account may mount the NRI socket, network namespace, or Anchor state paths.
+    - expression: >-
+        !has(object.metadata.annotations) ||
+        !({{ "dra.anchordra.co/tolerate-missing-nri-plugin" | quote }} in object.metadata.annotations) ||
+        (object.metadata.namespace == {{ .Release.Namespace | quote }} &&
+         object.spec.serviceAccountName == {{ printf "%s-node" (include "anchor.fullname" .) | quote }})
+      message: Only the Anchor node service account may bypass the mandatory NRI plugin check.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "anchor.fullname" . }}-hostpath
+  labels:
+    {{- include "anchor.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "anchor.fullname" . }}-hostpath
+  validationActions: [Deny]
+{{- end }}

@@ -8,16 +8,25 @@ import (
 	"strings"
 )
 
-const StrategyIPReassign = "ip-reassign"
+const (
+	StrategyL2Announce   = "l2-announce"
+	StrategyIPReassign   = "ip-reassign"
+	StrategyRouteRepoint = "route-repoint"
+)
 
 type TagSelector map[string]string
 
 type PathSpec struct {
-	Name           string      `json:"name" yaml:"name"`
-	SubnetID       string      `json:"subnetId" yaml:"subnetId"`
-	ENITagSelector TagSelector `json:"eniTagSelector" yaml:"eniTagSelector"`
-	Gateway        string      `json:"gateway,omitempty" yaml:"gateway,omitempty"`
-	Routes         []string    `json:"routes,omitempty" yaml:"routes,omitempty"`
+	Name            string      `json:"name" yaml:"name"`
+	InterfaceName   string      `json:"interfaceName" yaml:"interfaceName"`
+	RoutingTable    int         `json:"routingTable" yaml:"routingTable"`
+	SubnetID        string      `json:"subnetId" yaml:"subnetId"`
+	SubnetCIDR      string      `json:"subnetCidr,omitempty" yaml:"subnetCidr,omitempty"`
+	ParentInterface string      `json:"parentInterface,omitempty" yaml:"parentInterface,omitempty"`
+	ENITagSelector  TagSelector `json:"eniTagSelector" yaml:"eniTagSelector"`
+	RouteTableIDs   []string    `json:"routeTableIds,omitempty" yaml:"routeTableIds,omitempty"`
+	Gateway         string      `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	Routes          []string    `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
 type DeviceClassParameters struct {
@@ -49,10 +58,10 @@ func Decode[T any](raw []byte) (T, error) {
 
 func (p *DeviceClassParameters) NormalizeAndValidate() error {
 	if p.Strategy == "" {
-		p.Strategy = StrategyIPReassign
+		return fmt.Errorf("strategy is required")
 	}
-	if p.Strategy != StrategyIPReassign {
-		return fmt.Errorf("strategy %q is unsupported in anchor 0.1", p.Strategy)
+	if p.Strategy != StrategyL2Announce && p.Strategy != StrategyIPReassign && p.Strategy != StrategyRouteRepoint {
+		return fmt.Errorf("strategy %q is unsupported in anchor 0.2", p.Strategy)
 	}
 	if p.Profile == "" {
 		return fmt.Errorf("profile is required")
@@ -67,17 +76,55 @@ func (p *DeviceClassParameters) NormalizeAndValidate() error {
 		return fmt.Errorf("at least one path is required")
 	}
 	seen := map[string]bool{}
+	seenInterfaces := map[string]bool{}
+	seenTables := map[int]bool{}
 	for i := range p.Paths {
 		path := &p.Paths[i]
-		if path.Name == "" || path.SubnetID == "" {
-			return fmt.Errorf("path %d requires name and subnetId", i)
+		if path.Name == "" || path.InterfaceName == "" {
+			return fmt.Errorf("path %d requires name and interfaceName", i)
+		}
+		if len(path.InterfaceName) > 15 {
+			return fmt.Errorf("path %q interfaceName %q exceeds the Linux 15-character limit", path.Name, path.InterfaceName)
+		}
+		if path.RoutingTable < 1 || path.RoutingTable > 252 {
+			return fmt.Errorf("path %q routingTable must be between 1 and 252", path.Name)
 		}
 		if seen[path.Name] {
 			return fmt.Errorf("duplicate path name %q", path.Name)
 		}
 		seen[path.Name] = true
-		if len(path.ENITagSelector) == 0 {
-			return fmt.Errorf("path %q requires eniTagSelector", path.Name)
+		if seenInterfaces[path.InterfaceName] {
+			return fmt.Errorf("duplicate interfaceName %q", path.InterfaceName)
+		}
+		seenInterfaces[path.InterfaceName] = true
+		if seenTables[path.RoutingTable] {
+			return fmt.Errorf("duplicate routingTable %d", path.RoutingTable)
+		}
+		seenTables[path.RoutingTable] = true
+		if p.Strategy == StrategyL2Announce {
+			if path.ParentInterface == "" || path.SubnetCIDR == "" {
+				return fmt.Errorf("path %q requires parentInterface and subnetCidr for l2-announce", path.Name)
+			}
+			if path.SubnetID != "" || len(path.ENITagSelector) != 0 || len(path.RouteTableIDs) != 0 {
+				return fmt.Errorf("path %q AWS subnet, ENI selector, and route-table fields are invalid for l2-announce", path.Name)
+			}
+			subnet, err := netip.ParsePrefix(path.SubnetCIDR)
+			if err != nil || !subnet.Addr().Is4() || subnet != subnet.Masked() {
+				return fmt.Errorf("path %q has invalid canonical IPv4 subnetCidr %q", path.Name, path.SubnetCIDR)
+			}
+		} else {
+			if path.SubnetID == "" || len(path.ENITagSelector) == 0 {
+				return fmt.Errorf("path %q requires subnetId and eniTagSelector", path.Name)
+			}
+			if path.ParentInterface != "" || path.SubnetCIDR != "" {
+				return fmt.Errorf("path %q parentInterface and subnetCidr are only valid for l2-announce", path.Name)
+			}
+		}
+		if p.Strategy == StrategyRouteRepoint && len(path.RouteTableIDs) == 0 {
+			return fmt.Errorf("path %q requires routeTableIds for route-repoint", path.Name)
+		}
+		if p.Strategy == StrategyIPReassign && len(path.RouteTableIDs) != 0 {
+			return fmt.Errorf("path %q routeTableIds are only valid for route-repoint", path.Name)
 		}
 		if (path.Gateway == "") != (len(path.Routes) == 0) {
 			return fmt.Errorf("path %q requires gateway and routes to be configured together", path.Name)
@@ -134,7 +181,13 @@ func (p ClaimParameters) Validate(class DeviceClassParameters, subnetCIDRs map[s
 			return fmt.Errorf("duplicate IP %s", prefix.Addr())
 		}
 		seenIPs[prefix.Addr()] = true
+		if class.Strategy == StrategyRouteRepoint && prefix.Bits() != 32 {
+			return fmt.Errorf("route-repoint address %s for path %q must use a /32 prefix", prefix, address.Path)
+		}
 		cidr := subnetCIDRs[path.SubnetID]
+		if class.Strategy == StrategyL2Announce {
+			cidr = path.SubnetCIDR
+		}
 		if path.Gateway != "" && cidr == "" {
 			return fmt.Errorf("cannot validate gateway for path %q without discovered subnet CIDR", address.Path)
 		}
@@ -143,14 +196,16 @@ func (p ClaimParameters) Validate(class DeviceClassParameters, subnetCIDRs map[s
 			if err != nil {
 				return fmt.Errorf("invalid discovered subnet CIDR %q: %w", cidr, err)
 			}
-			if !subnet.Contains(prefix.Addr()) {
-				return fmt.Errorf("address %s is outside subnet %s for path %q", prefix.Addr(), subnet, address.Path)
-			}
-			if prefix.Bits() != subnet.Bits() {
-				return fmt.Errorf("address %s prefix length must match subnet %s for path %q", prefix, subnet, address.Path)
-			}
-			if awsReservedIPv4(subnet, prefix.Addr()) {
-				return fmt.Errorf("address %s is reserved by AWS in subnet %s", prefix.Addr(), subnet)
+			if class.Strategy == StrategyIPReassign || class.Strategy == StrategyL2Announce {
+				if !subnet.Contains(prefix.Addr()) {
+					return fmt.Errorf("address %s is outside subnet %s for path %q", prefix.Addr(), subnet, address.Path)
+				}
+				if prefix.Bits() != subnet.Bits() {
+					return fmt.Errorf("address %s prefix length must match subnet %s for path %q", prefix, subnet, address.Path)
+				}
+				if class.Strategy == StrategyIPReassign && awsReservedIPv4(subnet, prefix.Addr()) {
+					return fmt.Errorf("address %s is reserved by AWS in subnet %s", prefix.Addr(), subnet)
+				}
 			}
 			if path.Gateway != "" {
 				gateway, _ := netip.ParseAddr(path.Gateway)

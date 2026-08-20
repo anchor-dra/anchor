@@ -2,7 +2,7 @@ apiVersion: dra.anchordra.co/v1alpha1
 kind: AnchorRelease
 metadata:
   name: anchor-dra
-  version: 0.1.0
+  version: 0.2.0
 spec:
   identity:
     project: Anchor DRA
@@ -18,13 +18,19 @@ spec:
   delivery:
     architecture: amd64
   networking:
-    multusVersion: 4.2.2
-    requiredCNIPlugins:
-      - ipvlan
-      - static
-      - sbr
+    injector: nri-ipvlan
+    nriVersion: 0.12.2
+    runtime: containerd
+    testedRuntimeVersion: 2.2.6
+    requiredRuntimeFix: https://github.com/containerd/containerd/pull/13399
+    runtimeSelection:
+      runPodSandboxMinimumVersion: 2.2.6
+      fallbackHook: CreateContainer
+      lateRegistrationGuard: CreateContainer
+    requiredPlugin: anchor
   placementStrategies:
     - ip-reassign
+    - l2-announce
   dependencies:
     go: 1.24.0
     awsSDKGoV2: 1.36.3

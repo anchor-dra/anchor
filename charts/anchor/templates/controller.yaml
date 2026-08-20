@@ -43,19 +43,25 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - controller
-            - --aws-region={{ required "aws.region is required" .Values.aws.region }}
+            - --platform={{ .Values.platform }}
+            {{- if eq .Values.platform "aws" }}
+            - --aws-region={{ required "aws.region is required for the AWS platform" .Values.aws.region }}
+            {{- end }}
             - --aws-api-qps={{ .Values.aws.apiQPS }}
             - --aws-api-burst={{ .Values.aws.apiBurst }}
             - --reconcile-interval={{ .Values.controller.reconcileInterval }}
             - --inventory-interval={{ .Values.controller.inventoryInterval }}
             - --drift-interval={{ .Values.controller.driftInterval }}
+            - --readiness-interval={{ .Values.controller.readinessInterval }}
           env:
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if eq .Values.platform "aws" }}
             - name: AWS_EC2_METADATA_DISABLED
               value: {{ ternary "false" "true" .Values.aws.useInstanceProfile | quote }}
+            {{- end }}
           {{- with .Values.aws.credentialsSecretName }}
           envFrom:
             - secretRef:
