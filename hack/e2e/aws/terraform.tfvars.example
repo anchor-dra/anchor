@@ -9,3 +9,14 @@ worker_instance_profile_name  = "anchor-e2e-worker"
 worker_security_group_ids     = ["sg-xxxxxxxxxxxxxxxxx"]
 bastion_security_group_id     = "sg-yyyyyyyyyyyyyyyyy"
 trusted_operator_role_arn     = "arn:aws:iam::123456789012:role/anchor-e2e-operator"
+
+# Enable only for the disposable TGW route-repoint qualification.
+enable_route_repoint_harness             = false
+route_repoint_az_b                       = "eu-west-1b"
+route_repoint_kubernetes_subnet_b_id     = "subnet-kubernetes-eu-west-1b"
+route_repoint_carrier_subnets_b          = { a = "subnet-carrier-a-eu-west-1b", b = "subnet-carrier-b-eu-west-1b" }
+route_repoint_platform_tgw_subnet_cidrs  = { eu-west-1a = "10.40.250.0/28", eu-west-1b = "10.40.250.16/28" }
+route_repoint_carrier_route_table_ids    = ["rtb-carrier-a", "rtb-carrier-b"]
+route_repoint_peer_vpc_cidr              = "10.91.0.0/16"
+route_repoint_peer_subnet_cidrs          = { eu-west-1a = "10.91.1.0/24", eu-west-1b = "10.91.2.0/24" }
+route_repoint_carrier_prefix             = "198.51.100.0/24"

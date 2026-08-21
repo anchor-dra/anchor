@@ -105,7 +105,11 @@ Both direct pod claim references and claims generated from a
 `ResourceClaimTemplate` are supported. For template-backed references, the NRI
 plugin resolves the generated claim name through
 `Pod.status.resourceClaimStatuses`; a missing or inconsistent mapping fails the
-sandbox closed.
+sandbox closed. Durable ownership for a template-backed claim is keyed by its
+namespace, reserving Pod name, and pod claim alias rather than the generated
+ResourceClaim suffix. This keeps ownership stable across recreation of the
+same workload while preserving the generated claim name and UID for placement,
+events, plan storage, and garbage collection.
 
 ### Common component model
 
@@ -228,9 +232,12 @@ The architecture defines these placement strategies:
 The on-prem adapter inventories administrator-declared host parents, fences
 logical ownership through `EndpointOwnership`, requires explicit provider
 fencing before a move away from a NotReady node, and sends gratuitous ARP after
-namespace injection. `route-repoint` remains reserved and is not published in
-DRA inventory until its qualification is complete. A pod therefore cannot
-schedule on a strategy that its selected controller cannot execute.
+namespace injection. `route-repoint` remains qualification-gated and is not
+published in DRA inventory by default. Operators first enable its executor,
+complete the TGW qualification and preflight, and only then enable
+advertisement. A pod
+therefore cannot schedule on a strategy that its selected controller cannot
+execute.
 
 Strategies share claim validation, durable `EndpointOwnership`, force-takeover
 policy, batching, rate limiting, drift detection, status, and events. Only the
@@ -254,7 +261,7 @@ must prove:
 - outbound traffic with the carrier `/32` as source;
 - isolation between multiple ipvlan children on the same parent;
 - the required underlay address and on-link gateway model;
-- source/destination-check, security-group, NACL, DX, VGW, and TGW behavior;
+- source/destination-check, security-group, NACL, and TGW behavior;
 - dual-path SCTP behavior; and
 - same-AZ and cross-AZ route movement.
 
@@ -269,6 +276,21 @@ transactionally. Anchor therefore records and verifies per-table progress,
 retries partial updates, and does not transfer durable endpoint ownership until
 the required set has converged. For multihomed endpoints, it places and verifies
 one path at a time so an already healthy path is not needlessly disrupted.
+
+The managed set contains only VPC route tables whose exact endpoint `/32`
+lookup must select the carrier ENI, including TGW attachment-subnet or
+inspection-subnet tables where applicable. TGW route-table entries for the
+carrier aggregate, peer and return routes, attachment associations and
+propagation, and DX/VGW/BGP advertisements are stable infrastructure-owned
+covering routes. Qualification inventories every lookup hop and classifies it
+as either a listed Anchor-managed `/32` lookup or a stable aggregate lookup.
+
+Route-repoint paths list every allowed AZ-local carrier subnet and its gateway.
+Inventory selects an ENI only when both its tags and subnet match; placement
+persists only the resolved subnet and gateway. Editing a DeviceClass does not
+rewrite DRA's allocated class configuration. Managed-set changes therefore use
+one-at-a-time claim reallocation and expose a `ConfigurationCurrent` condition;
+a pod restart alone is insufficient for a standalone claim.
 
 Anchor provides endpoint reachability after rescheduling; preserving a live
 SCTP association across pod or node failure is not a `0.2` guarantee. Cloud
@@ -287,8 +309,10 @@ or drain the node so normal scheduling and placement can run again. These
 signals and the operator action are part of the runbook and alerting contract.
 The NRI callback remains local and does not perform AWS calls.
 
-Route capacity is discovered from the target account and route tables during
-installation and reconciliation. No universal AWS default is hard-coded.
+Route capacity is discovered from the target account and route tables by a
+mandatory installation and scaling preflight. The long-running controller does
+not receive Service Quotas access. A runtime route-limit error is isolated to
+the affected placement and reported through status, events, and metrics.
 
 ### Trust boundary
 
@@ -343,6 +367,11 @@ that preflight identity and is not automatically added to the long-running
 controller. The exact IAM policy and unsupported tag/condition combinations
 must be proven in the AWS qualification rather than inferred from the API
 names.
+
+For `0.2`, the route-repoint qualification and support target is Transit Gateway.
+Direct Connect and Virtual Private Gateway topologies remain unsupported until
+their aggregate advertisement, ingress lookup, and return-path behavior are
+qualified separately; they do not block the `0.2` release.
 
 ### Fail-closed runtime contract
 
@@ -570,8 +599,9 @@ Anchor `0.2` is not released until:
 ## Follow-up work
 
 1. Run the AWS shared-parent ipvlan route-repoint dataplane, route-table
-   coverage, and cutover qualification. Record a new ADR before implementation
-   if its result invalidates the shared-parent architecture.
+   coverage, and cutover qualification before advertising the strategy or
+   marking it supported. Record a new ADR if its result invalidates the
+   shared-parent architecture.
 2. Qualify containerd required-plugin bootstrap and NRI/primary-CNI hook
    ordering for both version-selected lifecycle events, including late
    registration, restart, reconnect, synchronization, sandbox recreation, and

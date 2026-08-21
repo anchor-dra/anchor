@@ -33,10 +33,15 @@ awk -v host="$private_dns" -v ip="$private_ip" '
     print ""
     host_added=1
   }
-  /^\[calico_rr\]/ && !worker_added {
+  /^\[anchor_candidate\]/ && !kube_node_added {
     print host
     print ""
-    worker_added=1
+    kube_node_added=1
+  }
+  /^\[calico_rr\]/ && !anchor_candidate_added {
+    print host
+    print ""
+    anchor_candidate_added=1
   }
   { print }
 ' "$source_inventory" >"$output_inventory"

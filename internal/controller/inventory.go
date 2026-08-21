@@ -31,13 +31,14 @@ type DiscoveryAPI interface {
 }
 
 type InventoryReconciler struct {
-	Core              kubernetes.Interface
-	Dynamic           dynamic.Interface
-	EC2               DiscoveryAPI
-	Platform          string
-	NodeLabel         string
-	EnabledStrategies map[string]bool
-	Logger            *slog.Logger
+	Core                 kubernetes.Interface
+	Dynamic              dynamic.Interface
+	EC2                  DiscoveryAPI
+	Platform             string
+	NodeLabel            string
+	EnabledStrategies    map[string]bool
+	AdvertisedStrategies map[string]bool
+	Logger               *slog.Logger
 }
 
 func (r *InventoryReconciler) Reconcile(ctx context.Context) error {
@@ -128,7 +129,9 @@ func (r *InventoryReconciler) inventoryForOnPremNode(node *corev1.Node, profiles
 			})
 		}
 		inventory.Profiles[name] = paths
-		inventory.SlotsPerNode[name] = profile.SlotsPerNode
+		if r.strategyAdvertised(profile.Strategy) {
+			inventory.SlotsPerNode[name] = profile.SlotsPerNode
+		}
 	}
 	return inventory
 }
@@ -191,6 +194,13 @@ func (r *InventoryReconciler) strategyEnabled(strategy string) bool {
 	return r.EnabledStrategies[strategy]
 }
 
+func (r *InventoryReconciler) strategyAdvertised(strategy string) bool {
+	if r.AdvertisedStrategies == nil {
+		return r.strategyEnabled(strategy)
+	}
+	return r.AdvertisedStrategies[strategy]
+}
+
 func (r *InventoryReconciler) syncNodeReadinessTaint(ctx context.Context, nodeName string) error {
 	inventory, err := r.Dynamic.Resource(anchorkube.InventoryGVR).Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -250,15 +260,23 @@ func (r *InventoryReconciler) inventoryForNode(nodeName, instanceID, az string, 
 				break
 			}
 			iface := matches[0]
+			if profile.Strategy == model.StrategyRouteRepoint && (iface.SourceDestCheck == nil || *iface.SourceDestCheck) {
+				r.Logger.Warn("route-repoint carrier ENI has source/destination check enabled", "node", nodeName, "profile", name, "path", path.Name, "eni", value(iface.NetworkInterfaceId))
+				complete = false
+				break
+			}
+			subnetID := value(iface.SubnetId)
 			paths = append(paths, model.ENIPath{
 				Name: path.Name, ENIID: value(iface.NetworkInterfaceId), MAC: value(iface.MacAddress),
-				SubnetID: path.SubnetID, SubnetCIDR: subnetCIDRs[path.SubnetID], Tags: tags(iface.TagSet),
+				SubnetID: subnetID, SubnetCIDR: subnetCIDRs[subnetID], Tags: tags(iface.TagSet),
 				PrimaryIPv4: primaryIPv4(iface.PrivateIpAddresses),
 			})
 		}
 		if complete {
 			inventory.Profiles[name] = paths
-			inventory.SlotsPerNode[name] = profile.SlotsPerNode
+			if r.strategyAdvertised(profile.Strategy) {
+				inventory.SlotsPerNode[name] = profile.SlotsPerNode
+			}
 		}
 	}
 	return inventory
@@ -308,7 +326,13 @@ func profileSubnetIDs(profiles map[string]model.DeviceClassParameters) []string 
 	result := []string{}
 	for _, profile := range profiles {
 		for _, path := range profile.Paths {
-			result = append(result, path.SubnetID)
+			if len(path.Subnets) == 0 {
+				result = append(result, path.SubnetID)
+				continue
+			}
+			for _, subnet := range path.Subnets {
+				result = append(result, subnet.SubnetID)
+			}
 		}
 	}
 	return result
@@ -366,7 +390,7 @@ func (r *InventoryReconciler) upsertInventory(ctx context.Context, spec model.An
 func matchingENIs(interfaces []ec2types.NetworkInterface, path model.PathSpec) []ec2types.NetworkInterface {
 	var result []ec2types.NetworkInterface
 	for _, iface := range interfaces {
-		if value(iface.SubnetId) != path.SubnetID || iface.Attachment == nil || iface.Attachment.DeviceIndex == nil || *iface.Attachment.DeviceIndex == 0 {
+		if _, allowed := path.ResolveAWSSubnet(value(iface.SubnetId)); !allowed || iface.Attachment == nil || iface.Attachment.DeviceIndex == nil || *iface.Attachment.DeviceIndex == 0 {
 			continue
 		}
 		if model.TagsMatch(tags(iface.TagSet), path.ENITagSelector) {

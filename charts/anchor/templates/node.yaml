@@ -48,6 +48,12 @@ spec:
         - key: node.kubernetes.io/unreachable
           operator: Exists
           effect: NoExecute
+        - key: node.kubernetes.io/network-unavailable
+          operator: Exists
+          effect: NoSchedule
+        - key: node.cloudprovider.kubernetes.io/uninitialized
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         seccompProfile:
           type: RuntimeDefault

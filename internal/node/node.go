@@ -192,13 +192,10 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 			return kubeletplugin.PrepareResult{Err: fmt.Errorf("path %q has no ready host interface", address.Path)}
 		}
 		configured := classByName[address.Path]
+		if _, allowed := configured.ResolveAWSSubnet(path.SubnetID); class.Strategy != model.StrategyL2Announce && (!allowed || !model.TagsMatch(path.Tags, configured.ENITagSelector)) {
+			return kubeletplugin.PrepareResult{Err: fmt.Errorf("path %q inventory does not match its allocated DeviceClass", address.Path)}
+		}
 		placementPaths = append(placementPaths, model.BuildPlacementPath(address, path, configured))
-	}
-	force := strings.EqualFold(claim.Annotations[constants.ForceStealAnnotation], "true")
-	spec := model.EndpointPlacementSpec{
-		ClaimName: claim.Name, ClaimUID: string(claim.UID), NodeName: p.config.NodeName,
-		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
-		Strategy: class.Strategy, ForceSteal: force, Paths: placementPaths,
 	}
 	reservation := claim.Status.ReservedFor[0]
 	if reservation.APIGroup != "" || reservation.Resource != "pods" || reservation.UID == "" {
@@ -207,6 +204,12 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 	pod, err := p.core.CoreV1().Pods(claim.Namespace).Get(ctx, reservation.Name, metav1.GetOptions{})
 	if err != nil || pod.UID != reservation.UID || pod.Spec.NodeName != p.config.NodeName {
 		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim reservation does not match a pod on node %s", p.config.NodeName)}
+	}
+	force := strings.EqualFold(claim.Annotations[constants.ForceStealAnnotation], "true")
+	spec := model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(claim.UID), OwnershipName: anchorkube.ClaimOwnershipName(claim, pod), NodeName: p.config.NodeName,
+		RequestName: allocation.Request, PoolName: allocation.Pool, DeviceName: allocation.Device,
+		Strategy: class.Strategy, ForceSteal: force, Paths: placementPaths,
 	}
 	placementName := "claim-" + string(claim.UID)
 	plan := PodNetworkPlan{

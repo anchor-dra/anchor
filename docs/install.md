@@ -157,6 +157,23 @@ Apply the `DeviceClass`, `ResourceClaim`, and pod under
 unique `routingTable`; `gateway` and `routes` are configured together. The pod
 manifest contains no networking annotation.
 
+AWS route-repoint is explicitly enabled and advertised through the chart's
+`aws.enabledStrategies` and `aws.advertisedStrategies` lists. Its paths use an
+administrator-owned `subnets` list with one AZ-local gateway per allowed
+subnet and a complete `routeTableIds` set. Anchor changes only exact endpoint
+`/32` routes in those tagged VPC route tables. TGW aggregate routes,
+attachments, propagation, return routes, and carrier advertisements remain
+infrastructure-owned. The 0.2 support target is TGW; DX and VGW topologies are
+unsupported until they complete separate qualification.
+
+DRA freezes DeviceClass configuration into a claim allocation. When an
+allowed subnet or managed route table changes, reallocate claims one endpoint
+at a time. Recreating a pod is sufficient for template-backed claims; a
+standalone claim must be scaled down, deleted and recreated under the same
+logical name, and then brought back up. Do not activate a new ingress path
+until every placement reports `ConfigurationCurrent=True` and every required
+route table is `Converged`.
+
 ## Upgrade from 0.1
 
 0.2 is a coordinated breaking cutover, not a rolling injector migration:

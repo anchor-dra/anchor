@@ -16,17 +16,23 @@ const (
 
 type TagSelector map[string]string
 
+type AWSSubnetSpec struct {
+	SubnetID string `json:"subnetId" yaml:"subnetId"`
+	Gateway  string `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+}
+
 type PathSpec struct {
-	Name            string      `json:"name" yaml:"name"`
-	InterfaceName   string      `json:"interfaceName" yaml:"interfaceName"`
-	RoutingTable    int         `json:"routingTable" yaml:"routingTable"`
-	SubnetID        string      `json:"subnetId" yaml:"subnetId"`
-	SubnetCIDR      string      `json:"subnetCidr,omitempty" yaml:"subnetCidr,omitempty"`
-	ParentInterface string      `json:"parentInterface,omitempty" yaml:"parentInterface,omitempty"`
-	ENITagSelector  TagSelector `json:"eniTagSelector" yaml:"eniTagSelector"`
-	RouteTableIDs   []string    `json:"routeTableIds,omitempty" yaml:"routeTableIds,omitempty"`
-	Gateway         string      `json:"gateway,omitempty" yaml:"gateway,omitempty"`
-	Routes          []string    `json:"routes,omitempty" yaml:"routes,omitempty"`
+	Name            string          `json:"name" yaml:"name"`
+	InterfaceName   string          `json:"interfaceName" yaml:"interfaceName"`
+	RoutingTable    int             `json:"routingTable" yaml:"routingTable"`
+	SubnetID        string          `json:"subnetId" yaml:"subnetId"`
+	SubnetCIDR      string          `json:"subnetCidr,omitempty" yaml:"subnetCidr,omitempty"`
+	ParentInterface string          `json:"parentInterface,omitempty" yaml:"parentInterface,omitempty"`
+	ENITagSelector  TagSelector     `json:"eniTagSelector" yaml:"eniTagSelector"`
+	Subnets         []AWSSubnetSpec `json:"subnets,omitempty" yaml:"subnets,omitempty"`
+	RouteTableIDs   []string        `json:"routeTableIds,omitempty" yaml:"routeTableIds,omitempty"`
+	Gateway         string          `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	Routes          []string        `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
 type DeviceClassParameters struct {
@@ -114,27 +120,55 @@ func (p *DeviceClassParameters) NormalizeAndValidate() error {
 			}
 		} else {
 			if path.SubnetID == "" || len(path.ENITagSelector) == 0 {
-				return fmt.Errorf("path %q requires subnetId and eniTagSelector", path.Name)
+				if p.Strategy != StrategyRouteRepoint || len(path.Subnets) == 0 || len(path.ENITagSelector) == 0 {
+					return fmt.Errorf("path %q requires AWS subnet topology and eniTagSelector", path.Name)
+				}
 			}
 			if path.ParentInterface != "" || path.SubnetCIDR != "" {
 				return fmt.Errorf("path %q parentInterface and subnetCidr are only valid for l2-announce", path.Name)
 			}
 		}
-		if p.Strategy == StrategyRouteRepoint && len(path.RouteTableIDs) == 0 {
-			return fmt.Errorf("path %q requires routeTableIds for route-repoint", path.Name)
+		if p.Strategy == StrategyRouteRepoint {
+			if path.SubnetID != "" || path.Gateway != "" {
+				return fmt.Errorf("path %q route-repoint topology must use subnets instead of subnetId or gateway", path.Name)
+			}
+			if len(path.RouteTableIDs) == 0 {
+				return fmt.Errorf("path %q requires routeTableIds for route-repoint", path.Name)
+			}
+			seenSubnets := map[string]bool{}
+			for _, subnet := range path.Subnets {
+				if subnet.SubnetID == "" || seenSubnets[subnet.SubnetID] {
+					return fmt.Errorf("path %q has an empty or duplicate route-repoint subnet", path.Name)
+				}
+				seenSubnets[subnet.SubnetID] = true
+				if (subnet.Gateway == "") != (len(path.Routes) == 0) {
+					return fmt.Errorf("path %q subnet %q requires gateway when routes are configured", path.Name, subnet.SubnetID)
+				}
+				if subnet.Gateway != "" {
+					gateway, err := netip.ParseAddr(subnet.Gateway)
+					if err != nil || !gateway.Is4() {
+						return fmt.Errorf("path %q subnet %q has invalid IPv4 gateway %q", path.Name, subnet.SubnetID, subnet.Gateway)
+					}
+				}
+			}
 		}
 		if p.Strategy == StrategyIPReassign && len(path.RouteTableIDs) != 0 {
 			return fmt.Errorf("path %q routeTableIds are only valid for route-repoint", path.Name)
 		}
-		if (path.Gateway == "") != (len(path.Routes) == 0) {
+		if p.Strategy != StrategyRouteRepoint && len(path.Subnets) != 0 {
+			return fmt.Errorf("path %q subnets are only valid for route-repoint", path.Name)
+		}
+		if p.Strategy != StrategyRouteRepoint && (path.Gateway == "") != (len(path.Routes) == 0) {
 			return fmt.Errorf("path %q requires gateway and routes to be configured together", path.Name)
 		}
-		if path.Gateway == "" {
+		if path.Gateway == "" && p.Strategy != StrategyRouteRepoint {
 			continue
 		}
-		gateway, err := netip.ParseAddr(path.Gateway)
-		if err != nil || !gateway.Is4() {
-			return fmt.Errorf("path %q has invalid IPv4 gateway %q", path.Name, path.Gateway)
+		if path.Gateway != "" {
+			gateway, err := netip.ParseAddr(path.Gateway)
+			if err != nil || !gateway.Is4() {
+				return fmt.Errorf("path %q has invalid IPv4 gateway %q", path.Name, path.Gateway)
+			}
 		}
 		seenRoutes := map[netip.Prefix]bool{}
 		for _, value := range path.Routes {
@@ -152,6 +186,18 @@ func (p *DeviceClassParameters) NormalizeAndValidate() error {
 		}
 	}
 	return nil
+}
+
+func (p PathSpec) ResolveAWSSubnet(subnetID string) (AWSSubnetSpec, bool) {
+	if len(p.Subnets) == 0 {
+		return AWSSubnetSpec{SubnetID: p.SubnetID, Gateway: p.Gateway}, p.SubnetID == subnetID
+	}
+	for _, subnet := range p.Subnets {
+		if subnet.SubnetID == subnetID {
+			return subnet, true
+		}
+	}
+	return AWSSubnetSpec{}, false
 }
 
 func (p ClaimParameters) Validate(class DeviceClassParameters, subnetCIDRs map[string]string) error {

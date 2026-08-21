@@ -12,6 +12,14 @@ aws:
   credentialsSecretName: ""
   apiQPS: 2
   apiBurst: 2
+  enabledStrategies:
+    - ip-reassign
+  advertisedStrategies:
+    - ip-reassign
+  routeRepoint:
+    managedRouteTableTag:
+      key: anchor-managed
+      value: "true"
 
 controller:
   replicas: 2

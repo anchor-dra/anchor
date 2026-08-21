@@ -26,6 +26,8 @@ directly without replacing the cluster's primary CNI.
   controller-approved carrier parent.
 - Atomic AWS reassignment with `AssignPrivateIpAddresses` and
   `AllowReassignment=true` when a pod moves.
+- Cross-AZ AWS route repointing for independently routed `/32`s, with complete
+  tagged VPC route-table convergence before ownership transfers.
 - A persistent pod network plan and NRI-driven ipvlan L2 injection with direct
   address, route, and source-rule configuration through netlink.
 - Durable `EndpointOwnership` records so GitOps, claim recreation, and namespace
@@ -35,8 +37,8 @@ directly without replacing the cluster's primary CNI.
 - Prometheus metrics, Kubernetes events, and placement status for operations.
 
 Anchor does not replace the primary CNI, allocate addresses from pools, create
-or attach ENIs, configure DX/TGW routing, or preserve a live SCTP association
-during node failure.
+or attach ENIs, configure TGW aggregate or external carrier routing, or
+preserve a live SCTP association during node failure.
 
 ## How it works
 
@@ -79,9 +81,12 @@ and failure semantics.
   infrastructure fencing before replacing a workload from a NotReady node.
 - Carrier ENIs tagged for explicit Anchor management and excluded from another
   ENI manager such as VPC CNI `ipamd`.
-- AWS security groups, subnet network ACLs, VPC routes, and external DX/TGW
-  routes that permit the intended peer traffic in both directions. Cross-subnet
-  paths require NACL rules before broader deny rules.
+- AWS security groups, subnet network ACLs, VPC routes, and TGW routes that
+  permit the intended peer traffic in both directions. Cross-subnet paths
+  require NACL rules before broader deny rules.
+
+The `0.2` route-repoint support target is TGW. Direct Connect and Virtual
+Private Gateway topologies remain unsupported until separately qualified.
 
 The AWS staging qualification targets Kubernetes `1.35.4`, containerd, Calico
 as the primary CNI, and two independently routed SCTP paths. Cilium is expected

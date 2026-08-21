@@ -122,9 +122,12 @@ func TestRouteRepointClaimUsesIndependentHostRoutes(t *testing.T) {
 	class.Strategy = StrategyRouteRepoint
 	for index := range class.Paths {
 		class.Paths[index].RouteTableIDs = []string{"rtb-carrier"}
+		class.Paths[index].Subnets = []AWSSubnetSpec{{SubnetID: class.Paths[index].SubnetID, Gateway: class.Paths[index].Gateway}}
+		class.Paths[index].SubnetID = ""
+		class.Paths[index].Gateway = ""
 	}
-	class.Paths[0].Gateway = "10.0.1.1"
 	class.Paths[0].Routes = []string{"0.0.0.0/0"}
+	class.Paths[0].Subnets[0].Gateway = "10.0.1.1"
 	if err := class.NormalizeAndValidate(); err != nil {
 		t.Fatal(err)
 	}

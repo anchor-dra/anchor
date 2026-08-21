@@ -42,6 +42,13 @@ func sameLogicalOwner(spec model.EndpointOwnershipSpec, namespace, name string) 
 	return spec.ClaimNamespace == namespace && spec.ClaimName == name
 }
 
+func ownershipClaimName(spec model.EndpointPlacementSpec) string {
+	if spec.OwnershipName != "" {
+		return spec.OwnershipName
+	}
+	return spec.ClaimName
+}
+
 func decodeOwnership(object *unstructured.Unstructured) (*ownershipRecord, error) {
 	record := &ownershipRecord{Object: object}
 	rawSpec, found, err := unstructured.NestedMap(object.Object, "spec")
@@ -125,6 +132,7 @@ func (r *PlacementReconciler) createOwnership(ctx context.Context, address, name
 }
 
 func (r *PlacementReconciler) reserveOwnerships(ctx context.Context, namespace string, spec model.EndpointPlacementSpec) (map[string]*ownershipRecord, error) {
+	claimName := ownershipClaimName(spec)
 	records := make(map[string]*ownershipRecord, len(spec.Paths))
 	missing := make([]model.PlacementPath, 0, len(spec.Paths))
 	for _, path := range spec.Paths {
@@ -140,18 +148,18 @@ func (r *PlacementReconciler) reserveOwnerships(ctx context.Context, namespace s
 		if err != nil {
 			return nil, err
 		}
-		if !sameLogicalOwner(record.Spec, namespace, spec.ClaimName) && !spec.ForceSteal {
+		if !sameLogicalOwner(record.Spec, namespace, claimName) && !spec.ForceSteal {
 			return nil, fmt.Errorf("address %s is owned by ResourceClaim %s/%s; set force-steal explicitly to transfer ownership", ip, record.Spec.ClaimNamespace, record.Spec.ClaimName)
 		}
 		records[ip] = record
 	}
 	for _, path := range missing {
 		ip, _ := ownershipAddress(path)
-		record, err := r.createOwnership(ctx, path.IP, namespace, spec.ClaimName)
+		record, err := r.createOwnership(ctx, path.IP, namespace, claimName)
 		if err != nil {
 			return nil, err
 		}
-		if !sameLogicalOwner(record.Spec, namespace, spec.ClaimName) && !spec.ForceSteal {
+		if !sameLogicalOwner(record.Spec, namespace, claimName) && !spec.ForceSteal {
 			return nil, fmt.Errorf("address %s is owned by ResourceClaim %s/%s; set force-steal explicitly to transfer ownership", ip, record.Spec.ClaimNamespace, record.Spec.ClaimName)
 		}
 		records[ip] = record
@@ -160,11 +168,12 @@ func (r *PlacementReconciler) reserveOwnerships(ctx context.Context, namespace s
 }
 
 func (r *PlacementReconciler) markOwnershipPlaced(ctx context.Context, record *ownershipRecord, namespace string, spec model.EndpointPlacementSpec, path model.PlacementPath) error {
+	claimName := ownershipClaimName(spec)
 	ownerChanged := false
-	if !sameLogicalOwner(record.Spec, namespace, spec.ClaimName) {
+	if !sameLogicalOwner(record.Spec, namespace, claimName) {
 		ownerChanged = true
 		record.Spec.ClaimNamespace = namespace
-		record.Spec.ClaimName = spec.ClaimName
+		record.Spec.ClaimName = claimName
 		rawSpec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&record.Spec)
 		if err != nil {
 			return err
@@ -242,7 +251,7 @@ func (r *PlacementReconciler) migrateOwnerships(ctx context.Context, placements 
 
 		selected := evidence[0]
 		for _, candidate := range evidence[1:] {
-			if candidate.namespace != selected.namespace || candidate.spec.ClaimName != selected.spec.ClaimName {
+			if candidate.namespace != selected.namespace || ownershipClaimName(candidate.spec) != ownershipClaimName(selected.spec) {
 				return fmt.Errorf("address %s has ambiguous legacy owners %s/%s and %s/%s", address, selected.namespace, selected.spec.ClaimName, candidate.namespace, candidate.spec.ClaimName)
 			}
 			if candidate.path.ENIID == selected.path.ENIID {
@@ -257,15 +266,15 @@ func (r *PlacementReconciler) migrateOwnerships(ctx context.Context, placements 
 		}
 
 		if err == nil {
-			if !sameLogicalOwner(record.Spec, selected.namespace, selected.spec.ClaimName) {
+			if !sameLogicalOwner(record.Spec, selected.namespace, ownershipClaimName(selected.spec)) {
 				continue
 			}
 		} else {
-			record, err = r.createOwnership(ctx, selected.path.IP, selected.namespace, selected.spec.ClaimName)
+			record, err = r.createOwnership(ctx, selected.path.IP, selected.namespace, ownershipClaimName(selected.spec))
 			if err != nil {
 				return err
 			}
-			if !sameLogicalOwner(record.Spec, selected.namespace, selected.spec.ClaimName) {
+			if !sameLogicalOwner(record.Spec, selected.namespace, ownershipClaimName(selected.spec)) {
 				return fmt.Errorf("cannot migrate address %s: ownership already belongs to %s/%s", address, record.Spec.ClaimNamespace, record.Spec.ClaimName)
 			}
 		}

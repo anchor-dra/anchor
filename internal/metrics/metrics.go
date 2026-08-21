@@ -12,6 +12,9 @@ var (
 	EC2Throttles = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "anchor", Name: "ec2_throttle_events_total", Help: "EC2 throttling responses observed by Anchor.",
 	}, []string{"operation"})
+	RouteTableUpdates = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "anchor", Name: "route_table_updates_total", Help: "Route-repoint table operations by operation and result.",
+	}, []string{"operation", "result"})
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "anchor", Name: "reconcile_errors_total", Help: "Reconciliation errors by controller.",
 	}, []string{"controller"})
@@ -33,5 +36,5 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, ReconcileErrors, ReconcileDuration, DriftDetections, Injections, InjectionRetries, InjectionFailureAge)
+	prometheus.MustRegister(Placements, PlacementDuration, EC2Throttles, RouteTableUpdates, ReconcileErrors, ReconcileDuration, DriftDetections, Injections, InjectionRetries, InjectionFailureAge)
 }

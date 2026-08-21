@@ -46,6 +46,10 @@ spec:
             - --platform={{ .Values.platform }}
             {{- if eq .Values.platform "aws" }}
             - --aws-region={{ required "aws.region is required for the AWS platform" .Values.aws.region }}
+            - --aws-enabled-strategies={{ join "," .Values.aws.enabledStrategies }}
+            - --aws-advertised-strategies={{ join "," .Values.aws.advertisedStrategies }}
+            - --aws-route-table-tag-key={{ required "aws.routeRepoint.managedRouteTableTag.key is required" .Values.aws.routeRepoint.managedRouteTableTag.key }}
+            - --aws-route-table-tag-value={{ required "aws.routeRepoint.managedRouteTableTag.value is required" .Values.aws.routeRepoint.managedRouteTableTag.value }}
             {{- end }}
             - --aws-api-qps={{ .Values.aws.apiQPS }}
             - --aws-api-burst={{ .Values.aws.apiBurst }}

@@ -65,23 +65,23 @@ func (s *IPReassign) Place(ctx context.Context, endpoint Endpoint) error {
 	if len(results) != 1 {
 		return fmt.Errorf("placement returned no result")
 	}
-	return results[0]
+	return results[0].Err
 }
 
-func (s *IPReassign) PlaceBatch(ctx context.Context, endpoints []Endpoint) []error {
-	results := make([]error, len(endpoints))
+func (s *IPReassign) PlaceBatch(ctx context.Context, endpoints []Endpoint) []PlacementResult {
+	results := make([]PlacementResult, len(endpoints))
 	if len(endpoints) == 0 {
 		return results
 	}
 	targets, owners, err := s.snapshot(ctx, endpoints)
 	if err != nil {
 		for i := range results {
-			results[i] = err
+			results[i].Err = err
 		}
 		return results
 	}
 	for i := range endpoints {
-		results[i] = s.placeFromSnapshot(ctx, endpoints[i], targets, owners)
+		results[i].Err = s.placeFromSnapshot(ctx, endpoints[i], targets, owners)
 	}
 	return results
 }

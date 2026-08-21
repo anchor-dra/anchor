@@ -96,10 +96,10 @@ func (s *Announce) validateTransferFence(ctx context.Context, endpoint anchoraws
 
 func (s *Announce) Release(context.Context, anchoraws.Endpoint) error { return nil }
 
-func (s *Announce) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []error {
-	results := make([]error, len(endpoints))
+func (s *Announce) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []anchoraws.PlacementResult {
+	results := make([]anchoraws.PlacementResult, len(endpoints))
 	for i := range endpoints {
-		results[i] = s.Place(ctx, endpoints[i])
+		results[i].Err = s.Place(ctx, endpoints[i])
 	}
 	return results
 }

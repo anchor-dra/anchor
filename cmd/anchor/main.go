@@ -49,6 +49,8 @@ func command(logger *slog.Logger) *cobra.Command {
 
 func controllerCommand(logger *slog.Logger) *cobra.Command {
 	var kubeconfig, platform, region, nodeLabel, namespace, identity, metricsAddress string
+	var routeTagKey, routeTagValue string
+	var enabledStrategies, advertisedStrategies []string
 	var interval, inventoryInterval, driftInterval, readinessInterval time.Duration
 	var qps float64
 	var burst int
@@ -72,11 +74,34 @@ func controllerCommand(logger *slog.Logger) *cobra.Command {
 				}
 				limitedEC2 := anchoraws.NewRateLimitedEC2(awsec2.NewFromConfig(awsCfg), qps, burst)
 				inventory.EC2 = limitedEC2
-				inventory.EnabledStrategies = map[string]bool{model.StrategyIPReassign: true}
-				placement.Strategy = anchoraws.NewIPReassign(limitedEC2, logger)
-				placement.StrategyName = model.StrategyIPReassign
+				enabled, err := awsStrategySet(enabledStrategies)
+				if err != nil {
+					return err
+				}
+				advertised, err := awsStrategySet(advertisedStrategies)
+				if err != nil {
+					return err
+				}
+				for name := range advertised {
+					if !enabled[name] {
+						return fmt.Errorf("advertised AWS strategy %q is not enabled", name)
+					}
+				}
+				placement.Strategies = map[string]anchoraws.BatchPlacementStrategy{}
+				if enabled[model.StrategyIPReassign] {
+					placement.Strategies[model.StrategyIPReassign] = anchoraws.NewIPReassign(limitedEC2, logger)
+				}
+				if enabled[model.StrategyRouteRepoint] {
+					if routeTagKey == "" || routeTagValue == "" {
+						return errors.New("route-repoint requires --aws-route-table-tag-key and --aws-route-table-tag-value")
+					}
+					placement.Strategies[model.StrategyRouteRepoint] = anchoraws.NewRouteRepoint(limitedEC2, routeTagKey, routeTagValue, logger)
+				}
+				inventory.EnabledStrategies = enabled
+				inventory.AdvertisedStrategies = advertised
 			case "onprem":
 				inventory.EnabledStrategies = map[string]bool{model.StrategyL2Announce: true}
+				inventory.AdvertisedStrategies = map[string]bool{model.StrategyL2Announce: true}
 				placement.Strategy = anchorl2.New(clients.Core, logger)
 				placement.StrategyName = model.StrategyL2Announce
 			default:
@@ -112,6 +137,10 @@ func controllerCommand(logger *slog.Logger) *cobra.Command {
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "kubeconfig path; empty uses in-cluster configuration")
 	cmd.Flags().StringVar(&platform, "platform", "aws", "placement platform: aws or onprem")
 	cmd.Flags().StringVar(&region, "aws-region", "", "AWS region")
+	cmd.Flags().StringSliceVar(&enabledStrategies, "aws-enabled-strategies", []string{model.StrategyIPReassign}, "AWS strategies whose existing placements may be reconciled")
+	cmd.Flags().StringSliceVar(&advertisedStrategies, "aws-advertised-strategies", []string{model.StrategyIPReassign}, "enabled AWS strategies whose devices may be advertised")
+	cmd.Flags().StringVar(&routeTagKey, "aws-route-table-tag-key", "anchor-managed", "required management tag key for route-repoint tables")
+	cmd.Flags().StringVar(&routeTagValue, "aws-route-table-tag-value", "true", "required management tag value for route-repoint tables")
 	cmd.Flags().StringVar(&nodeLabel, "node-label", constants.DriverName+"/enabled=true", "label selector for eligible nodes")
 	cmd.Flags().StringVar(&namespace, "namespace", constants.SystemNamespace, "leader-election namespace")
 	cmd.Flags().StringVar(&identity, "leader-election-identity", os.Getenv("POD_NAME"), "leader-election identity")
@@ -123,6 +152,17 @@ func controllerCommand(logger *slog.Logger) *cobra.Command {
 	cmd.Flags().Float64Var(&qps, "aws-api-qps", 2, "global EC2 API requests per second")
 	cmd.Flags().IntVar(&burst, "aws-api-burst", 2, "global EC2 API request burst")
 	return cmd
+}
+
+func awsStrategySet(values []string) (map[string]bool, error) {
+	result := map[string]bool{}
+	for _, value := range values {
+		if value != model.StrategyIPReassign && value != model.StrategyRouteRepoint {
+			return nil, fmt.Errorf("unsupported AWS strategy %q", value)
+		}
+		result[value] = true
+	}
+	return result, nil
 }
 
 func nodeCommand(logger *slog.Logger) *cobra.Command {

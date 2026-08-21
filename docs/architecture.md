@@ -50,6 +50,13 @@ through netlink. Each profile path owns:
 - the connected and link-scope gateway routes; and
 - source-specific rules and administrator-defined peer routes.
 
+For durable ownership, a standalone claim uses its ResourceClaim name. A
+template-generated claim uses the stable reserving Pod name plus its pod claim
+alias, while the generated ResourceClaim name and UID remain the execution
+identity. Recreating the same named Pod can therefore advance ownership to a
+new generated claim UID without `force-steal`; a different logical owner still
+fails closed.
+
 Injection is idempotent and verified before the callback returns. A partial
 failure removes children created during that attempt, returns an NRI error so
 containers cannot start, persists `Recovering`, emits
@@ -89,7 +96,7 @@ installation per address set. It restores reachability after reconciliation;
 it does not promise to preserve a live SCTP association through pod or node
 failure.
 
-The enabled 0.2 strategies are same-AZ AWS IPv4 `ip-reassign` and on-premises
+The default 0.2 strategies are same-AZ AWS IPv4 `ip-reassign` and on-premises
 `l2-announce`. The latter sends gratuitous ARP only after the ipvlan endpoint is
 fully configured. A move from a healthy node is serialized by DRA unprepare; a
 move from a NotReady node requires the provider or operator to record
@@ -97,6 +104,8 @@ move from a NotReady node requires the provider or operator to record
 the Kubernetes control-plane view from being treated as proof that a stale
 on-prem workload stopped.
 
-`route-repoint` remains a configuration seam but is rejected by the controller
-and omitted from published DRA inventory until the shared-parent `/32`
-dataplane and IAM design pass staging qualification.
+`route-repoint` is implemented for independently routed IPv4 `/32`s and
+cross-AZ carrier ENIs. It is disabled and unadvertised by default; operators
+enable its executor and advertise its DRA devices only after the TGW dataplane,
+IAM, route-capacity, and complete route-table set pass preflight and staging
+qualification.

@@ -76,9 +76,10 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 }
 
 resource "aws_network_interface" "carrier" {
-  for_each        = local.carrier_paths
-  subnet_id       = each.value.subnet_id
-  security_groups = [aws_security_group.carrier.id]
+  for_each          = local.carrier_paths
+  subnet_id         = each.value.subnet_id
+  security_groups   = [aws_security_group.carrier.id]
+  source_dest_check = false
   tags = {
     Name             = "anchor-e2e-${each.key}"
     carrier-endpoint = "true"
@@ -166,6 +167,8 @@ data "aws_iam_policy_document" "controller" {
     actions = [
       "ec2:DescribeInstances",
       "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeVpcs",
       "ec2:DescribeSubnets"
     ]
     resources = ["*"]
@@ -179,6 +182,22 @@ data "aws_iam_policy_document" "controller" {
       test     = "StringEquals"
       variable = "aws:ResourceTag/carrier-endpoint"
       values   = ["true"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_route_repoint_harness ? [1] : []
+    content {
+      sid     = "RepointQualifiedCarrierRoutes"
+      actions = ["ec2:CreateRoute", "ec2:ReplaceRoute"]
+      resources = [
+        for table in aws_route_table.route_ingress : table.arn
+      ]
+      condition {
+        test     = "StringEquals"
+        variable = "aws:ResourceTag/anchor-managed"
+        values   = ["true"]
+      }
     }
   }
 }
