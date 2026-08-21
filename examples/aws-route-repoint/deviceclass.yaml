@@ -1,0 +1,36 @@
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: carrier-routed-endpoint.dra.anchordra.co
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "dra.anchordra.co" &&
+          device.attributes["dra.anchordra.co"].profile == "carrier-routed-dual"
+  config:
+    - opaque:
+        driver: dra.anchordra.co
+        parameters:
+          strategy: route-repoint
+          profile: carrier-routed-dual
+          slotsPerNode: 1
+          paths:
+            - name: path-a
+              interfaceName: sigtran-a
+              routingTable: 101
+              eniTagSelector: {carrier-endpoint: "true", carrier-path: a}
+              subnets:
+                - {subnetId: subnet-path-a-eu-west-1a, gateway: 10.50.1.1}
+                - {subnetId: subnet-path-a-eu-west-1b, gateway: 10.50.3.1}
+              routes: [10.90.0.0/16]
+              routeTableIds: [rtb-ingress-a, rtb-ingress-b]
+            - name: path-b
+              interfaceName: sigtran-b
+              routingTable: 102
+              eniTagSelector: {carrier-endpoint: "true", carrier-path: b}
+              subnets:
+                - {subnetId: subnet-path-b-eu-west-1a, gateway: 10.50.2.1}
+                - {subnetId: subnet-path-b-eu-west-1b, gateway: 10.50.4.1}
+              routes: [10.90.0.0/16]
+              routeTableIds: [rtb-ingress-a, rtb-ingress-b]

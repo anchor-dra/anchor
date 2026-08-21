@@ -20,6 +20,19 @@ func (c *countingEC2) DescribeSubnets(context.Context, *awsec2.DescribeSubnetsIn
 	return &awsec2.DescribeSubnetsOutput{}, nil
 }
 
+func (c *countingEC2) DescribeRouteTables(context.Context, *awsec2.DescribeRouteTablesInput, ...func(*awsec2.Options)) (*awsec2.DescribeRouteTablesOutput, error) {
+	return &awsec2.DescribeRouteTablesOutput{}, nil
+}
+func (c *countingEC2) DescribeVpcs(context.Context, *awsec2.DescribeVpcsInput, ...func(*awsec2.Options)) (*awsec2.DescribeVpcsOutput, error) {
+	return &awsec2.DescribeVpcsOutput{}, nil
+}
+func (c *countingEC2) CreateRoute(context.Context, *awsec2.CreateRouteInput, ...func(*awsec2.Options)) (*awsec2.CreateRouteOutput, error) {
+	return &awsec2.CreateRouteOutput{}, nil
+}
+func (c *countingEC2) ReplaceRoute(context.Context, *awsec2.ReplaceRouteInput, ...func(*awsec2.Options)) (*awsec2.ReplaceRouteOutput, error) {
+	return &awsec2.ReplaceRouteOutput{}, nil
+}
+
 func (c *countingEC2) AssignPrivateIpAddresses(context.Context, *awsec2.AssignPrivateIpAddressesInput, ...func(*awsec2.Options)) (*awsec2.AssignPrivateIpAddressesOutput, error) {
 	return &awsec2.AssignPrivateIpAddressesOutput{}, nil
 }

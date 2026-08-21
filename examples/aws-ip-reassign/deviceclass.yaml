@@ -17,6 +17,8 @@ spec:
           slotsPerNode: 1
           paths:
             - name: path-a
+              interfaceName: sigtran-a
+              routingTable: 101
               subnetId: subnet-aaaaaaaaaaaaaaaaa
               gateway: 10.50.1.1
               routes:
@@ -25,6 +27,8 @@ spec:
                 carrier-endpoint: "true"
                 carrier-path: a
             - name: path-b
+              interfaceName: sigtran-b
+              routingTable: 102
               subnetId: subnet-bbbbbbbbbbbbbbbbb
               gateway: 10.50.2.1
               routes:

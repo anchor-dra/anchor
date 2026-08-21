@@ -3,14 +3,10 @@ kind: Pod
 metadata:
   name: smsc-sctp
   namespace: anchor-e2e
-  annotations:
-    k8s.v1.cni.cncf.io/networks: >-
-      [{"name":"anchor-smsc-sigtran-endpoint-path-a","interface":"sigtran-a"},
-       {"name":"anchor-smsc-sigtran-endpoint-path-b","interface":"sigtran-b"}]
 spec:
   containers:
     - name: sctp
-      image: anchor-sctp-e2e:0.1.0
+      image: anchor-sctp-e2e:0.2.0
       imagePullPolicy: IfNotPresent
       command: ["sleep", "infinity"]
       resources:

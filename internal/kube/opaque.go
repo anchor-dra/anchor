@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"errors"
 	"fmt"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -8,6 +9,8 @@ import (
 	"github.com/anchor-dra/anchor/internal/constants"
 	"github.com/anchor-dra/anchor/internal/model"
 )
+
+var ErrNoAllocationForDriver = errors.New("claim has no allocation for Anchor driver")
 
 func AllocationParameters(claim *resourceapi.ResourceClaim) (model.DeviceClassParameters, model.ClaimParameters, error) {
 	var class model.DeviceClassParameters
@@ -60,7 +63,7 @@ func AllocationForDriver(claim *resourceapi.ResourceClaim) (*resourceapi.DeviceR
 		result = allocation
 	}
 	if result == nil {
-		return nil, fmt.Errorf("claim has no allocation for %s", constants.DriverName)
+		return nil, fmt.Errorf("%w %s", ErrNoAllocationForDriver, constants.DriverName)
 	}
 	return result, nil
 }

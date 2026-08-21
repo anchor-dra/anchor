@@ -24,13 +24,19 @@ type PlacementStrategy interface {
 }
 
 type VerificationResult struct {
-	Placed bool
-	Err    error
+	Placed      bool
+	Err         error
+	RouteTables []model.RouteTableStatus
+}
+
+type PlacementResult struct {
+	Err         error
+	RouteTables []model.RouteTableStatus
 }
 
 type BatchPlacementStrategy interface {
 	PlacementStrategy
-	PlaceBatch(context.Context, []Endpoint) []error
+	PlaceBatch(context.Context, []Endpoint) []PlacementResult
 	VerifyBatch(context.Context, []Endpoint) ([]VerificationResult, error)
 }
 

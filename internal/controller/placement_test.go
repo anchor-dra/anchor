@@ -31,12 +31,13 @@ type partialStrategy struct {
 }
 
 type recordingStrategy struct {
-	endpoints    []anchoraws.Endpoint
-	verified     []anchoraws.Endpoint
-	verifyCalls  int
-	err          error
-	verification []anchoraws.VerificationResult
-	verifyErr    error
+	endpoints        []anchoraws.Endpoint
+	verified         []anchoraws.Endpoint
+	verifyCalls      int
+	err              error
+	verification     []anchoraws.VerificationResult
+	verifyErr        error
+	placementResults []anchoraws.PlacementResult
 }
 
 func (s *recordingStrategy) Validate(context.Context, anchoraws.Endpoint) error { return nil }
@@ -45,10 +46,14 @@ func (s *recordingStrategy) Place(_ context.Context, endpoint anchoraws.Endpoint
 	s.endpoints = append(s.endpoints, endpoint)
 	return s.err
 }
-func (s *recordingStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []error {
-	results := make([]error, len(endpoints))
+func (s *recordingStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []anchoraws.PlacementResult {
+	if s.placementResults != nil {
+		s.endpoints = append(s.endpoints, endpoints...)
+		return s.placementResults
+	}
+	results := make([]anchoraws.PlacementResult, len(endpoints))
 	for i := range endpoints {
-		results[i] = s.Place(ctx, endpoints[i])
+		results[i].Err = s.Place(ctx, endpoints[i])
 	}
 	return results
 }
@@ -108,10 +113,23 @@ func authorizePlacement(t *testing.T, claim *resourceapi.ResourceClaim, spec *mo
 	addresses := make([]model.AddressSpec, 0, len(spec.Paths))
 	inventorySpecPaths := make([]model.ENIPath, 0, len(spec.Paths))
 	inventoryStatusPaths := make([]model.ENIPath, 0, len(spec.Paths))
-	for _, path := range spec.Paths {
-		classPaths = append(classPaths, model.PathSpec{Name: path.Name, SubnetID: path.SubnetID, ENITagSelector: model.TagSelector{"test": "true"}, Gateway: path.Gateway, Routes: append([]string(nil), path.Routes...)})
+	for index := range spec.Paths {
+		path := &spec.Paths[index]
+		if path.InterfaceName == "" {
+			path.InterfaceName = fmt.Sprintf("carrier-%d", index)
+		}
+		if path.RoutingTable == 0 {
+			path.RoutingTable = 100 + index
+		}
+		classPath := model.PathSpec{Name: path.Name, InterfaceName: path.InterfaceName, RoutingTable: path.RoutingTable, SubnetID: path.SubnetID, ENITagSelector: model.TagSelector{"test": "true"}, Gateway: path.Gateway, Routes: append([]string(nil), path.Routes...), RouteTableIDs: append([]string(nil), path.RouteTableIDs...)}
+		if spec.Strategy == model.StrategyRouteRepoint {
+			classPath.Subnets = []model.AWSSubnetSpec{{SubnetID: path.SubnetID, Gateway: path.Gateway}}
+			classPath.SubnetID = ""
+			classPath.Gateway = ""
+		}
+		classPaths = append(classPaths, classPath)
 		addresses = append(addresses, model.AddressSpec{Path: path.Name, IP: path.IP})
-		inventoryPath := model.ENIPath{Name: path.Name, ENIID: path.ENIID, SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR, Tags: map[string]string{"test": "true"}}
+		inventoryPath := model.ENIPath{Name: path.Name, ENIID: path.ENIID, MAC: path.ParentMAC, SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR, Tags: map[string]string{"test": "true"}}
 		inventorySpecPaths = append(inventorySpecPaths, inventoryPath)
 		inventoryPath.Interface = path.Interface
 		inventoryStatusPaths = append(inventoryStatusPaths, inventoryPath)
@@ -171,7 +189,6 @@ func testDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient
 		anchorkube.InventoryGVR: "AnchorNodeInventoryList",
 		anchorkube.PlacementGVR: "EndpointPlacementList",
 		anchorkube.OwnershipGVR: "EndpointOwnershipList",
-		anchorkube.NADGVR:       "NetworkAttachmentDefinitionList",
 	}
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objects...)
 }
@@ -195,10 +212,10 @@ func (s *partialStrategy) Place(_ context.Context, _ anchoraws.Endpoint) error {
 	}
 	return nil
 }
-func (s *partialStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []error {
-	results := make([]error, len(endpoints))
+func (s *partialStrategy) PlaceBatch(ctx context.Context, endpoints []anchoraws.Endpoint) []anchoraws.PlacementResult {
+	results := make([]anchoraws.PlacementResult, len(endpoints))
 	for i := range endpoints {
-		results[i] = s.Place(ctx, endpoints[i])
+		results[i].Err = s.Place(ctx, endpoints[i])
 	}
 	return results
 }
@@ -277,17 +294,6 @@ func TestUnreservedClaimRetainsPreviousPlacement(t *testing.T) {
 	}
 }
 
-func TestNADNameIsStableAndBounded(t *testing.T) {
-	short := NADName("claim", "a")
-	if short != "anchor-claim-a" {
-		t.Fatalf("unexpected name %q", short)
-	}
-	long := NADName("this-is-a-very-long-resource-claim-name-that-needs-to-be-truncated", "long-path")
-	if len(long) > 63 || long != NADName("this-is-a-very-long-resource-claim-name-that-needs-to-be-truncated", "long-path") {
-		t.Fatalf("invalid deterministic name %q", long)
-	}
-}
-
 func TestOwnershipNameIsStableAndCanonical(t *testing.T) {
 	first, err := OwnershipName("10.0.1.10/24")
 	if err != nil {
@@ -336,13 +342,43 @@ func TestRecreatedClaimUsesDurablePreviousENI(t *testing.T) {
 	if len(owners) != 1 || owners[0].UID != uid || owners[0].Kind != "ResourceClaim" {
 		t.Fatalf("placement owner reference is wrong: %#v", owners)
 	}
-	nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Get(ctx, NADName("endpoint", "a"), metav1.GetOptions{})
+}
+
+func TestRecreatedTemplateClaimUsesStableLogicalOwnership(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("34343434-3434-3434-3434-343434343434")
+	claim := testClaim("test", "workload-endpoint-new12", uid)
+	path := model.PlacementPath{Name: "a", IP: "10.0.1.12/24", ENIID: "eni-new", Interface: "ens6", SubnetID: "subnet-a"}
+	spec := model.EndpointPlacementSpec{
+		ClaimName: claim.Name, ClaimUID: string(uid), OwnershipName: "workload-endpoint",
+		NodeName: "node-new", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path},
+	}
+	pod, inventory := authorizePlacement(t, claim, &spec)
+	controller := true
+	claim.Annotations = map[string]string{"resource.kubernetes.io/pod-claim-name": "endpoint"}
+	claim.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID, Controller: &controller}}
+	pod.Name = "workload"
+	claim.Status.ReservedFor[0].Name = pod.Name
+	claim.Status.ReservedFor[0].UID = pod.UID
+	claim.OwnerReferences[0].Name = pod.Name
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+	ownership := testOwnership(t, path.IP, claim.Namespace, spec.OwnershipName, "eni-old")
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
+	strategy := &recordingStrategy{}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 1 || strategy.endpoints[0].PreviousENI != "eni-old" || strategy.endpoints[0].ForceSteal {
+		t.Fatalf("template claim did not inherit logical ownership: %#v", strategy.endpoints)
+	}
+	updated, err := reconciler.getOwnership(ctx, path.IP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	owners = nad.GetOwnerReferences()
-	if len(owners) != 1 || owners[0].UID != placement.GetUID() || owners[0].Kind != "EndpointPlacement" {
-		t.Fatalf("NAD owner reference is wrong: %#v", owners)
+	if updated.Spec.ClaimName != spec.OwnershipName || updated.Status.ClaimUID != string(uid) {
+		t.Fatalf("template ownership was not advanced: %#v", updated)
 	}
 }
 
@@ -360,13 +396,8 @@ func TestStaleClaimCleanupDoesNotConflictWithRecreation(t *testing.T) {
 	oldStatus := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{oldPath}}
 	oldPlacement := testPlacement(t, "recreated", "claim-"+string(oldUID), oldUID, oldSpec, oldStatus)
 	newPlacement := testPlacement(t, "recreated", "claim-"+string(newUID), newUID, newSpec, nil)
-	oldNAD := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "k8s.cni.cncf.io/v1", "kind": "NetworkAttachmentDefinition",
-		"metadata": map[string]any{"name": NADName(claim.Name, "a"), "namespace": "recreated", "labels": map[string]any{"dra.anchordra.co/claim-uid": string(oldUID)}},
-		"spec":     map[string]any{"config": "old"},
-	}}
 	ownership := testOwnership(t, oldPath.IP, claim.Namespace, claim.Name, "eni-old")
-	dynamicClient := testDynamicClient(oldPlacement, newPlacement, oldNAD, ownership, inventory)
+	dynamicClient := testDynamicClient(oldPlacement, newPlacement, ownership, inventory)
 	strategy := &recordingStrategy{}
 	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategy: strategy}
 
@@ -386,16 +417,9 @@ func TestStaleClaimCleanupDoesNotConflictWithRecreation(t *testing.T) {
 	if storedOwnership.Status.ENIID != "eni-new" || storedOwnership.Status.ClaimUID != string(newUID) {
 		t.Fatalf("ownership did not move to recreated claim: %#v", storedOwnership.Status)
 	}
-	nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("recreated").Get(ctx, NADName(claim.Name, "a"), metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if nad.GetLabels()["dra.anchordra.co/claim-uid"] != string(newUID) {
-		t.Fatalf("NAD was not recreated for the new claim: %#v", nad.GetLabels())
-	}
 }
 
-func TestDeletingClaimRetainsPlacementAndNADUntilGone(t *testing.T) {
+func TestDeletingClaimRetainsPlacementUntilGone(t *testing.T) {
 	ctx := context.Background()
 	uid := types.UID("56565656-5656-5656-5656-565656565656")
 	now := metav1.Now()
@@ -407,18 +431,7 @@ func TestDeletingClaimRetainsPlacementAndNADUntilGone(t *testing.T) {
 	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-old", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
 	status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{path}}
 	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
-	nad := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "k8s.cni.cncf.io/v1", "kind": "NetworkAttachmentDefinition",
-		"metadata": map[string]any{
-			"name": NADName(claim.Name, path.Name), "namespace": claim.Namespace,
-			"labels": map[string]any{constants.DriverName + "/claim-uid": string(uid)},
-		},
-		"spec": map[string]any{"config": "existing"},
-	}}
 	dynamicClient := testDynamicClient(placement)
-	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Create(ctx, nad, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
 	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim), Dynamic: dynamicClient, Strategy: &recordingStrategy{}}
 
 	if err := reconciler.Reconcile(ctx); err != nil {
@@ -427,19 +440,12 @@ func TestDeletingClaimRetainsPlacementAndNADUntilGone(t *testing.T) {
 	if _, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{}); err != nil {
 		t.Fatalf("terminating claim lost its placement: %v", err)
 	}
-	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Get(ctx, nad.GetName(), metav1.GetOptions{}); err != nil {
-		t.Fatalf("terminating claim lost its NAD: %v", err)
-	}
-
 	reconciler.Core = fake.NewSimpleClientset()
 	if err := reconciler.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("gone claim retained its placement: %v", err)
-	}
-	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace(claim.Namespace).Get(ctx, nad.GetName(), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("gone claim retained its NAD: %v", err)
 	}
 }
 
@@ -563,6 +569,119 @@ func TestFailedForceStealDoesNotTransferDurableOwnership(t *testing.T) {
 	}
 	if !sameLogicalOwner(updated.Spec, "old", "endpoint") || updated.Status.ENIID != "eni-old" {
 		t.Fatalf("failed placement transferred ownership: %#v", updated)
+	}
+}
+
+func TestPartialRouteConvergenceDoesNotTransferDurableOwnership(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1")
+	claim := testClaim("new", "endpoint", uid)
+	path := model.PlacementPath{
+		Name: "a", IP: "198.51.100.60/32", ENIID: "eni-new", Interface: "ens6",
+		SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24", RouteTableIDs: []string{"rtb-a", "rtb-b"},
+	}
+	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-new", Strategy: model.StrategyRouteRepoint, ForceSteal: true, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, nil)
+	ownership := testOwnership(t, path.IP, "old", "endpoint", "eni-old")
+	dynamicClient := testDynamicClient(placement, ownership, inventory)
+	strategy := &recordingStrategy{placementResults: []anchoraws.PlacementResult{{
+		Err: errors.New("rtb-b did not converge"),
+		RouteTables: []model.RouteTableStatus{
+			{PathName: "a", RouteTableID: "rtb-a", Phase: model.RouteTableConverged, ObservedTargetType: "network-interface", ObservedTargetID: "eni-new"},
+			{PathName: "a", RouteTableID: "rtb-b", Phase: model.RouteTableError, Message: "injected failure"},
+		},
+	}}}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod), Dynamic: dynamicClient, Strategies: map[string]anchoraws.BatchPlacementStrategy{model.StrategyRouteRepoint: strategy}}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	updatedOwnership, err := reconciler.getOwnership(ctx, path.IP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameLogicalOwner(updatedOwnership.Spec, "old", "endpoint") || updatedOwnership.Status.ENIID != "eni-old" {
+		t.Fatalf("partial route convergence transferred ownership: %#v", updatedOwnership)
+	}
+	stored, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, status, err := decodePlacement(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Phase != model.PlacementFailed || len(status.RouteTables) != 2 || status.RouteTables[0].Phase != model.RouteTableConverged || status.RouteTables[1].Phase != model.RouteTableError {
+		t.Fatalf("partial route-table progress was not retained: %#v", status)
+	}
+}
+
+func TestDeviceClassChangeMarksReadyPlacementStaleWithoutReapplying(t *testing.T) {
+	ctx := context.Background()
+	uid := types.UID("b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2")
+	claim := testClaim("test", "endpoint", uid)
+	path := model.PlacementPath{Name: "a", IP: "10.0.1.61/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a", SubnetCIDR: "10.0.1.0/24"}
+	spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-a", Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
+	pod, inventory := authorizePlacement(t, claim, &spec)
+	claim.Spec.Devices.Requests = []resourceapi.DeviceRequest{{Name: spec.RequestName, Exactly: &resourceapi.ExactDeviceRequest{DeviceClassName: "carrier"}}}
+	allocatedClass, _, err := anchorkube.AllocationParameters(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentClass := allocatedClass
+	currentClass.SlotsPerNode++
+	currentRaw, err := json.Marshal(currentClass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceClass := &resourceapi.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "carrier"},
+		Spec: resourceapi.DeviceClassSpec{Config: []resourceapi.DeviceClassConfiguration{{DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{
+			Driver: constants.DriverName, Parameters: runtime.RawExtension{Raw: currentRaw},
+		}}}}},
+	}
+	status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{path}}
+	placement := testPlacement(t, claim.Namespace, "claim-"+string(uid), uid, spec, status)
+	dynamicClient := testDynamicClient(placement, inventory)
+	strategy := &recordingStrategy{}
+	reconciler := &PlacementReconciler{Core: fake.NewSimpleClientset(claim, pod, deviceClass), Dynamic: dynamicClient, Strategy: strategy}
+
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(strategy.endpoints) != 0 {
+		t.Fatalf("stale Ready placement was unexpectedly reapplied: %#v", strategy.endpoints)
+	}
+	stored, err := dynamicClient.Resource(anchorkube.PlacementGVR).Namespace(claim.Namespace).Get(ctx, placement.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, storedStatus, err := decodePlacement(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedStatus.Phase != model.PlacementReady || len(storedStatus.Conditions) != 1 || storedStatus.Conditions[0].Type != "ConfigurationCurrent" || storedStatus.Conditions[0].Status != metav1.ConditionFalse {
+		t.Fatalf("DeviceClass drift condition is wrong: %#v", storedStatus)
+	}
+}
+
+func TestDeviceClassComparisonTreatsTopologySetsAsUnordered(t *testing.T) {
+	left := model.DeviceClassParameters{Strategy: model.StrategyRouteRepoint, Profile: "carrier", SlotsPerNode: 1, Paths: []model.PathSpec{
+		{Name: "b", InterfaceName: "sigtran-b", RoutingTable: 102, ENITagSelector: model.TagSelector{"path": "b"}, Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-b"}, {SubnetID: "subnet-a"}}, RouteTableIDs: []string{"rtb-b", "rtb-a"}, Routes: []string{"10.2.0.0/16", "10.1.0.0/16"}},
+		{Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, ENITagSelector: model.TagSelector{"path": "a"}, Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-a"}}, RouteTableIDs: []string{"rtb-a"}},
+	}}
+	right := left
+	right.Paths = []model.PathSpec{left.Paths[1], left.Paths[0]}
+	right.Paths[1].Subnets = []model.AWSSubnetSpec{{SubnetID: "subnet-a"}, {SubnetID: "subnet-b"}}
+	right.Paths[1].RouteTableIDs = []string{"rtb-a", "rtb-b"}
+	right.Paths[1].Routes = []string{"10.1.0.0/16", "10.2.0.0/16"}
+	if !deviceClassEquivalent(left, right) {
+		t.Fatal("semantically identical DeviceClasses were reported as stale")
+	}
+	right.Paths[0].RoutingTable++
+	if deviceClassEquivalent(left, right) {
+		t.Fatal("material DeviceClass change was ignored")
 	}
 }
 
@@ -809,94 +928,6 @@ func TestNodeInventoryStatusCannotChangeAWSIdentity(t *testing.T) {
 	}
 }
 
-func TestNADOwnerReferenceIsRepairedWithoutSpecChange(t *testing.T) {
-	ctx := context.Background()
-	uid := types.UID("cccccccc-cccc-cccc-cccc-cccccccccccc")
-	placement := testPlacement(t, "test", "claim-"+string(uid), uid, model.EndpointPlacementSpec{}, nil)
-	path := model.PlacementPath{Name: "a", IP: "10.0.1.70/24", ENIID: "eni-a", Interface: "ens6", SubnetID: "subnet-a"}
-	dynamicClient := testDynamicClient(placement)
-	reconciler := &PlacementReconciler{Dynamic: dynamicClient}
-
-	if err := reconciler.upsertNAD(ctx, placement, "endpoint", string(uid), path); err != nil {
-		t.Fatal(err)
-	}
-	name := NADName("endpoint", "a")
-	nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	nad.SetOwnerReferences(nil)
-	if _, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Update(ctx, nad, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reconciler.upsertNAD(ctx, placement, "endpoint", string(uid), path); err != nil {
-		t.Fatal(err)
-	}
-	repaired, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	owners := repaired.GetOwnerReferences()
-	if len(owners) != 1 || owners[0].UID != uid || owners[0].Kind != "EndpointPlacement" {
-		t.Fatalf("NAD owner reference was not repaired: %#v", owners)
-	}
-}
-
-func TestNADStaticIPAMRouting(t *testing.T) {
-	ctx := context.Background()
-	uid := types.UID("abababab-abab-abab-abab-abababababab")
-	placement := testPlacement(t, "test", "claim-"+string(uid), uid, model.EndpointPlacementSpec{}, nil)
-	dynamicClient := testDynamicClient(placement)
-	reconciler := &PlacementReconciler{Dynamic: dynamicClient}
-
-	for _, tt := range []struct {
-		name         string
-		path         model.PlacementPath
-		wantGateway  string
-		wantRouteDst string
-	}{
-		{name: "same subnet", path: model.PlacementPath{Name: "plain", IP: "10.0.1.70/24", Interface: "ens6"}},
-		{name: "routed", path: model.PlacementPath{Name: "routed", IP: "10.0.1.71/24", Interface: "ens6", Gateway: "10.0.1.1", Routes: []string{"192.0.2.0/24"}}, wantGateway: "10.0.1.1", wantRouteDst: "192.0.2.0/24"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := reconciler.upsertNAD(ctx, placement, "endpoint", string(uid), tt.path); err != nil {
-				t.Fatal(err)
-			}
-			nad, err := dynamicClient.Resource(anchorkube.NADGVR).Namespace("test").Get(ctx, NADName("endpoint", tt.path.Name), metav1.GetOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, _, _ := unstructured.NestedString(nad.Object, "spec", "config")
-			var config struct {
-				Plugins []struct {
-					IPAM struct {
-						Addresses []struct {
-							Gateway string `json:"gateway"`
-						} `json:"addresses"`
-						Routes []struct {
-							Destination string `json:"dst"`
-							Gateway     string `json:"gw"`
-						} `json:"routes"`
-					} `json:"ipam"`
-				} `json:"plugins"`
-			}
-			if err := json.Unmarshal([]byte(encoded), &config); err != nil {
-				t.Fatal(err)
-			}
-			ipam := config.Plugins[0].IPAM
-			if len(ipam.Addresses) != 1 || ipam.Addresses[0].Gateway != tt.wantGateway {
-				t.Fatalf("unexpected address gateway: %#v", ipam.Addresses)
-			}
-			if tt.wantRouteDst == "" && len(ipam.Routes) != 0 {
-				t.Fatalf("same-subnet NAD contains routes: %#v", ipam.Routes)
-			}
-			if tt.wantRouteDst != "" && (len(ipam.Routes) != 1 || ipam.Routes[0].Destination != tt.wantRouteDst || ipam.Routes[0].Gateway != tt.wantGateway) {
-				t.Fatalf("unexpected routes: %#v", ipam.Routes)
-			}
-		})
-	}
-}
-
 func TestAmbiguousLegacyOwnershipFailsWithoutGuessing(t *testing.T) {
 	ctx := context.Background()
 	address := "10.0.1.80/24"
@@ -908,7 +939,7 @@ func TestAmbiguousLegacyOwnershipFailsWithoutGuessing(t *testing.T) {
 		path := model.PlacementPath{Name: "a", IP: address, ENIID: "eni-" + namespace, Interface: "ens6", SubnetID: "subnet-a"}
 		spec := model.EndpointPlacementSpec{ClaimName: claim.Name, ClaimUID: string(uid), NodeName: "node-" + namespace, Strategy: model.StrategyIPReassign, Paths: []model.PlacementPath{path}}
 		pod, inventory := authorizePlacement(t, claim, &spec)
-		status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: []model.PlacementPath{path}}
+		status := &model.EndpointPlacementStatus{Phase: model.PlacementReady, ObservedGeneration: 1, Paths: append([]model.PlacementPath(nil), spec.Paths...)}
 		objects = append(objects, testPlacement(t, namespace, "claim-"+string(uid), uid, spec, status))
 		objects = append(objects, inventory)
 		coreObjects = append(coreObjects, claim, pod)
@@ -1034,7 +1065,7 @@ func TestReadyPlacementIsOnlyCheckedByDriftReconcile(t *testing.T) {
 	if err := reconciler.VerifyReady(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(strategy.endpoints) != 2 {
-		t.Fatalf("drifted endpoint repaired %d paths, want 2", len(strategy.endpoints))
+	if len(strategy.endpoints) != 1 {
+		t.Fatalf("drifted endpoint repaired %d paths, want only the drifted path", len(strategy.endpoints))
 	}
 }

@@ -18,6 +18,8 @@ spec:
       app.kubernetes.io/component: node
   template:
     metadata:
+      annotations:
+        dra.anchordra.co/tolerate-missing-nri-plugin: "true"
       labels:
         app.kubernetes.io/name: {{ include "anchor.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -25,10 +27,33 @@ spec:
     spec:
       serviceAccountName: {{ include "anchor.fullname" . }}-node
       hostNetwork: true
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       priorityClassName: system-node-critical
       nodeSelector:
         {{- toYaml .Values.node.selector | nindent 8 }}
+      tolerations:
+        - key: dra.anchordra.co/not-ready
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoSchedule
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+        - key: node.kubernetes.io/network-unavailable
+          operator: Exists
+          effect: NoSchedule
+        - key: node.cloudprovider.kubernetes.io/uninitialized
+          operator: Exists
+          effect: NoSchedule
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -42,6 +67,10 @@ spec:
             - --pod-uid=$(POD_UID)
             - --preparation-timeout={{ .Values.node.preparationTimeout }}
             - --refresh-interval={{ .Values.node.refreshInterval }}
+            - --network-reconcile-interval={{ .Values.node.networkReconcileInterval }}
+            - --plan-gc-interval={{ .Values.node.planGCInterval }}
+            - --state-directory=/var/lib/anchor/plans
+            - --nri-socket=/var/run/nri/nri.sock
           env:
             - name: NODE_NAME
               valueFrom:
@@ -58,15 +87,28 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-              add: ["NET_ADMIN"]
+              add: ["NET_ADMIN", "NET_RAW", "SYS_ADMIN"]
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
           volumeMounts:
+            - name: network-namespaces
+              mountPath: /var/run/netns
+              readOnly: true
+              mountPropagation: HostToContainer
             - name: plugins-registry
               mountPath: /var/lib/kubelet/plugins_registry
             - name: plugins
               mountPath: /var/lib/kubelet/plugins
+            - name: nri
+              mountPath: /var/run/nri
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/anchor
       volumes:
+        - name: network-namespaces
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
         - name: plugins-registry
           hostPath:
             path: /var/lib/kubelet/plugins_registry
@@ -74,4 +116,12 @@ spec:
         - name: plugins
           hostPath:
             path: /var/lib/kubelet/plugins
+            type: DirectoryOrCreate
+        - name: nri
+          hostPath:
+            path: /var/run/nri
+            type: Directory
+        - name: state
+          hostPath:
+            path: /var/lib/anchor
             type: DirectoryOrCreate

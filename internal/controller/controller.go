@@ -16,6 +16,7 @@ type Controller struct {
 	Interval          time.Duration
 	InventoryInterval time.Duration
 	DriftInterval     time.Duration
+	ReadinessInterval time.Duration
 	Logger            *slog.Logger
 }
 
@@ -32,17 +33,23 @@ func (c *Controller) Run(ctx context.Context) error {
 	if c.DriftInterval <= 0 {
 		c.DriftInterval = time.Minute
 	}
+	if c.ReadinessInterval <= 0 {
+		c.ReadinessInterval = 5 * time.Second
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
 	placementTicker := time.NewTicker(c.Interval)
 	inventoryTicker := time.NewTicker(c.InventoryInterval)
 	driftTicker := time.NewTicker(c.DriftInterval)
+	readinessTicker := time.NewTicker(c.ReadinessInterval)
 	defer placementTicker.Stop()
 	defer inventoryTicker.Stop()
 	defer driftTicker.Stop()
+	defer readinessTicker.Stop()
 	c.runAndLog(ctx, "placement", c.reconcilePlacement)
 	c.runAndLog(ctx, "inventory", c.reconcileInventory)
+	c.runAndLog(ctx, "readiness", c.reconcileReadiness)
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,6 +61,8 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-driftTicker.C:
 			c.runAndLog(ctx, "placement", c.reconcilePlacement)
 			c.runAndLog(ctx, "drift", c.reconcileDrift)
+		case <-readinessTicker.C:
+			c.runAndLog(ctx, "readiness", c.reconcileReadiness)
 		}
 	}
 }
@@ -64,7 +73,8 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	}
 	placementErr := c.reconcilePlacement(ctx)
 	inventoryErr := c.reconcileInventory(ctx)
-	return errors.Join(inventoryErr, placementErr)
+	readinessErr := c.reconcileReadiness(ctx)
+	return errors.Join(inventoryErr, placementErr, readinessErr)
 }
 
 func (c *Controller) reconcileInventory(ctx context.Context) error {
@@ -77,6 +87,10 @@ func (c *Controller) reconcilePlacement(ctx context.Context) error {
 
 func (c *Controller) reconcileDrift(ctx context.Context) error {
 	return c.observe("drift", func() error { return c.Placement.VerifyReady(ctx) })
+}
+
+func (c *Controller) reconcileReadiness(ctx context.Context) error {
+	return c.observe("readiness", func() error { return c.Inventory.ReconcileTaints(ctx) })
 }
 
 func (c *Controller) observe(name string, reconcile func() error) error {
