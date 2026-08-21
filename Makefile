@@ -1,6 +1,6 @@
 .PHONY: build test test-race vet check helm image
 
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 IMAGE ?= anchor:$(VERSION)
 
 build:
@@ -17,8 +17,11 @@ vet:
 
 helm:
 	helm lint charts/anchor --set aws.region=eu-west-1
+	helm lint charts/anchor --set platform=onprem
 	helm template anchor charts/anchor --namespace anchor-system --kube-version 1.34.0 \
 		--set aws.region=eu-west-1 >/dev/null
+	helm template anchor charts/anchor --namespace anchor-system --kube-version 1.34.0 \
+		--set platform=onprem >/dev/null
 
 check: test-race vet helm
 

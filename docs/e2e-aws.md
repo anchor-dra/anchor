@@ -12,9 +12,17 @@ The topology requalified on 2026-08-18 was:
 - two carrier subnets and one dual-homed SCTP peer in the same AZ
 - bidirectional security-group and network-ACL rules for SCTP between paths
 
-The cluster was qualified on Kubernetes 1.35.4 with Multus 4.2.2. Kubernetes
-minor upgrades are breaking platform changes and must be completed and
-validated in the infrastructure layer before Anchor qualification.
+The 0.2 qualification target is Kubernetes 1.35.4 with containerd 2.2.6, NRI,
+and Calico. On 2.2.6, `RunPodSandbox` is primary and `CreateContainer` is the
+late-registration guard. The 2.2.5 compatibility qualification uses only
+`CreateContainer` and
+must prove that failed injection leaves one reusable sandbox and starts no
+containers. Kubernetes or runtime minor upgrades are breaking platform changes
+and must be validated in the infrastructure layer before Anchor qualification.
+This proves the 2.2.5 runtime workaround for self-managed nodes. Stock EKS
+AL2023 with 2.2.5 is also a supported target, but its `nodeadm` bootstrap,
+required-plugin enforcement, CNI ordering, and cold restart behavior require a
+separate run on the selected EKS AMI release.
 
 ## 1. Provision the disposable substrate
 
@@ -52,15 +60,14 @@ From the pinned Kubespray checkout, add only the new node:
 ansible-playbook -i .work/hosts.ini \
   -e @/path/to/kubespray/inventory/anchor/group_vars/k8s_cluster/k8s-cluster.yml \
   -e kube_version=1.35.4 \
-  -e kube_network_plugin_multus=true \
-  -e multus_version=4.2.2 \
+  -e nri_enabled=true \
   -b scale.yml \
   --limit="$worker_dns"
 ```
 
-Verify Kubernetes exposes `resource.k8s.io/v1`, both workers are Ready, Multus
-is available, and `multus`, `ipvlan`, `static`, and `sbr` exist in the node CNI
-binary directory.
+Verify Kubernetes exposes `resource.k8s.io/v1`, both workers are Ready, and
+containerd has the NRI default validator configured with `anchor` as a required
+plugin. Before installing Anchor, prove an ordinary test pod fails closed.
 
 ## 3. Install the Anchor RC
 
@@ -70,13 +77,13 @@ available without credentials. Only the SCTP test workload is built locally and
 imported into containerd on both endpoint workers:
 
 ```bash
-ANCHOR_VERSION=0.1.0-rc.1
+ANCHOR_VERSION=0.2.0-rc.1
 helm pull oci://ghcr.io/anchor-dra/charts/anchor \
   --version "$ANCHOR_VERSION"
 
 docker build --platform linux/amd64 \
-  -f hack/e2e/Dockerfile.sctp -t anchor-sctp-e2e:0.1.0 .
-docker save -o .work/anchor-sctp-e2e.tar anchor-sctp-e2e:0.1.0
+  -f hack/e2e/Dockerfile.sctp -t anchor-sctp-e2e:0.2.0 .
+docker save -o .work/anchor-sctp-e2e.tar anchor-sctp-e2e:0.2.0
 
 ansible kube_node -i .work/hosts.ini --limit=ENDPOINT_NODES -b \
   -m copy -a 'src=.work/anchor-sctp-e2e.tar dest=/tmp/anchor-sctp-e2e.tar mode=0600'
@@ -92,11 +99,16 @@ those control-plane nodes, then apply the examples:
 ```bash
 kubectl --context "$KUBE_CONTEXT" label node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
   dra.anchordra.co/enabled=true
+kubectl --context "$KUBE_CONTEXT" taint node ENDPOINT_NODE_1 ENDPOINT_NODE_2 \
+  dra.anchordra.co/not-ready=true:NoSchedule
+kubectl --context "$KUBE_CONTEXT" create namespace anchor-system
+kubectl --context "$KUBE_CONTEXT" label namespace anchor-system \
+  pod-security.kubernetes.io/enforce=privileged --overwrite
 
 helm --kube-context "$KUBE_CONTEXT" upgrade --install anchor \
   oci://ghcr.io/anchor-dra/charts/anchor \
   --version "$ANCHOR_VERSION" \
-  --namespace anchor-system --create-namespace \
+  --namespace anchor-system \
   --set aws.region=eu-west-1 \
   --set aws.useInstanceProfile=true \
   --set 'controller.nodeSelector.node-role\.kubernetes\.io/control-plane=' \
@@ -209,7 +221,7 @@ test "$old_claim_uid" != "$new_claim_uid"
 kubectl --context "$KUBE_CONTEXT" uncordon "$current_node"
 ```
 
-The old UID-named EndpointPlacement and its NADs must be gone. The replacement
+The old UID-named EndpointPlacement must be gone. The replacement
 must become Ready on the other worker without `force-steal`, while the two
 cluster-scoped ownership records keep the same logical owner and update to the
 new claim UID and ENIs:
@@ -217,7 +229,6 @@ new claim UID and ENIs:
 ```bash
 kubectl --context "$KUBE_CONTEXT" get endpointownerships.dra.anchordra.co -o wide
 kubectl --context "$KUBE_CONTEXT" -n anchor-e2e get endpointplacements
-kubectl --context "$KUBE_CONTEXT" -n anchor-e2e get network-attachment-definitions
 ```
 
 Repeat once with `kubectl delete namespace anchor-e2e --wait` instead of
@@ -234,6 +245,11 @@ Record the following evidence under ignored `.work/evidence/`:
 - ResourceClaim allocation and ResourceSlices
 - EndpointPlacement, EndpointOwnership, owner-reference, and Kubernetes event
   state before and after claim and namespace recreation
+- containerd required-plugin failure tests for absence, late start, restart,
+  reconnect, and sandbox recreation
+- the selected NRI hook from registration logs and, on 2.2.5, stable sandbox
+  identity and count across repeated failed `CreateContainer` attempts
+- persisted plan phase and injection failure/retry metrics
 - `ip -d address`, policy routes, and both crossed off-subnet route lookups
   inside the pod
 - EC2 private-IP ownership before and after rescheduling

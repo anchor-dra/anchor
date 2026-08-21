@@ -5,8 +5,8 @@ and releases. Pull requests run validation only. A push to `develop` publishes a
 release candidate; merging that exact tested tree to `main` promotes it to the
 matching stable version.
 
-The first `develop` release is bootstrapped as `v0.1.0-rc.1` from the matching
-`0.1.0` versions in `release.yaml` and `charts/anchor/Chart.yaml`. Later
+The first `0.2` `develop` release is bootstrapped as `v0.2.0-rc.1` from the matching
+`0.2.0` versions in `release.yaml` and `charts/anchor/Chart.yaml`. Later
 candidate versions are calculated from commits since the latest stable tag:
 
 | Commit | Release |
@@ -28,19 +28,19 @@ merges are accepted when the resulting trees are identical.
 
 ## Published artifacts
 
-For candidate `0.1.0-rc.1`, the `develop` workflow creates:
+For candidate `0.2.0-rc.1`, the `develop` workflow creates:
 
-- GitHub prerelease and tag `v0.1.0-rc.1`;
-- image `ghcr.io/anchor-dra/anchor:0.1.0-rc.1` and `rc-latest`;
-- Helm chart `oci://ghcr.io/anchor-dra/charts/anchor` version `0.1.0-rc.1`;
+- GitHub prerelease and tag `v0.2.0-rc.1`;
+- image `ghcr.io/anchor-dra/anchor:0.2.0-rc.1` and `rc-latest`;
+- Helm chart `oci://ghcr.io/anchor-dra/charts/anchor` version `0.2.0-rc.1`;
 - packaged chart, versioned `release.yaml`, and `SHA256SUMS` release assets.
 
 After promotion, the `main` workflow creates:
 
-- GitHub release and tag `v0.1.0`;
-- Linux AMD64 image `ghcr.io/anchor-dra/anchor:0.1.0`, plus immutable commit and
+- GitHub release and tag `v0.2.0`;
+- Linux AMD64 image `ghcr.io/anchor-dra/anchor:0.2.0`, plus immutable commit and
   convenience `latest` tags;
-- Helm chart `oci://ghcr.io/anchor-dra/charts/anchor` version `0.1.0`;
+- Helm chart `oci://ghcr.io/anchor-dra/charts/anchor` version `0.2.0`;
 - packaged chart, versioned `release.yaml`, and `SHA256SUMS` release assets.
 
 The Go binary version, container tag, chart version, chart `appVersion`, and
@@ -75,17 +75,17 @@ make image VERSION=ci
 After the `develop` workflow completes, verify the RC packages and assets:
 
 ```bash
-docker pull ghcr.io/anchor-dra/anchor:0.1.0-rc.1
-helm pull oci://ghcr.io/anchor-dra/charts/anchor --version 0.1.0-rc.1
-gh release view v0.1.0-rc.1 --repo anchor-dra/anchor
+docker pull ghcr.io/anchor-dra/anchor:0.2.0-rc.1
+helm pull oci://ghcr.io/anchor-dra/charts/anchor --version 0.2.0-rc.1
+gh release view v0.2.0-rc.1 --repo anchor-dra/anchor
 ```
 
 After promotion to `main`, verify the stable packages and release:
 
 ```bash
-docker pull ghcr.io/anchor-dra/anchor:0.1.0
-helm pull oci://ghcr.io/anchor-dra/charts/anchor --version 0.1.0
-gh release view v0.1.0 --repo anchor-dra/anchor
+docker pull ghcr.io/anchor-dra/anchor:0.2.0
+helm pull oci://ghcr.io/anchor-dra/charts/anchor --version 0.2.0
+gh release view v0.2.0 --repo anchor-dra/anchor
 ```
 
 Do not create RC or stable tags by hand. Manually created tags bypass the

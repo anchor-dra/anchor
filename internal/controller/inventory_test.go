@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -75,6 +77,24 @@ func TestMatchingENIsRequiresSecondaryTagAndSubnet(t *testing.T) {
 	}
 }
 
+func TestRouteRepointInventoryResolvesAZLocalSubnet(t *testing.T) {
+	secondary := int32(1)
+	disabled := false
+	class := model.DeviceClassParameters{Strategy: model.StrategyRouteRepoint, Profile: "carrier", Paths: []model.PathSpec{{
+		Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, ENITagSelector: model.TagSelector{"carrier-path": "a"},
+		Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-az-a", Gateway: "10.0.1.1"}, {SubnetID: "subnet-az-b", Gateway: "10.0.2.1"}},
+		Routes:  []string{"10.90.0.0/16"}, RouteTableIDs: []string{"rtb-ingress-a", "rtb-ingress-b"},
+	}}}
+	iface := ec2types.NetworkInterface{NetworkInterfaceId: stringptr("eni-b"), SubnetId: stringptr("subnet-az-b"), SourceDestCheck: &disabled,
+		Attachment: &ec2types.NetworkInterfaceAttachment{DeviceIndex: &secondary}, TagSet: []ec2types.Tag{{Key: stringptr("carrier-path"), Value: stringptr("a")}}}
+	reconciler := &InventoryReconciler{Logger: slog.Default()}
+	inventory := reconciler.inventoryForNode("node-b", "i-b", "eu-west-1b", []ec2types.NetworkInterface{iface}, map[string]string{"subnet-az-a": "10.0.1.0/24", "subnet-az-b": "10.0.2.0/24"}, map[string]model.DeviceClassParameters{"carrier": class})
+	paths := inventory.Profiles["carrier"]
+	if len(paths) != 1 || paths[0].SubnetID != "subnet-az-b" || paths[0].SubnetCIDR != "10.0.2.0/24" {
+		t.Fatalf("route-repoint did not resolve the node-local subnet: %#v", paths)
+	}
+}
+
 func TestInventoryFailureDoesNotBlockPlacement(t *testing.T) {
 	ctx := context.Background()
 	badNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "bad"}, Spec: corev1.NodeSpec{ProviderID: "aws:///eu-west-1a/i-bad"}}
@@ -122,7 +142,7 @@ func TestInventoryDiscoveryIsBatchedForSixtyNodes(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "carrier"},
 		Spec: resourceapi.DeviceClassSpec{Config: []resourceapi.DeviceClassConfiguration{{DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{
 			Driver:     constants.DriverName,
-			Parameters: runtime.RawExtension{Raw: []byte(`{"strategy":"ip-reassign","profile":"carrier","paths":[{"name":"a","subnetId":"subnet-a","eniTagSelector":{"carrier-path":"a"}}]}`)},
+			Parameters: runtime.RawExtension{Raw: []byte(`{"strategy":"ip-reassign","profile":"carrier","paths":[{"name":"a","interfaceName":"carrier-a","routingTable":100,"subnetId":"subnet-a","eniTagSelector":{"carrier-path":"a"}}]}`)},
 		}}}}},
 	})
 	discovery := &batchDiscovery{interfaces: interfaces}
@@ -137,5 +157,96 @@ func TestInventoryDiscoveryIsBatchedForSixtyNodes(t *testing.T) {
 	}
 	if _, err := dynamicClient.Resource(anchorkube.InventoryGVR).Get(ctx, "node-059", metav1.GetOptions{}); err != nil {
 		t.Fatalf("last node inventory was not created: %v", err)
+	}
+}
+
+func TestUnsupportedStrategyIsNotAdvertised(t *testing.T) {
+	class := &resourceapi.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "route-repoint"},
+		Spec: resourceapi.DeviceClassSpec{Config: []resourceapi.DeviceClassConfiguration{{DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{
+			Driver:     constants.DriverName,
+			Parameters: runtime.RawExtension{Raw: []byte(`{"strategy":"route-repoint","profile":"carrier","paths":[{"name":"a","interfaceName":"carrier-a","routingTable":100,"subnets":[{"subnetId":"subnet-a"}],"routeTableIds":["rtb-a"],"eniTagSelector":{"carrier-path":"a"}}]}`)},
+		}}}}},
+	}
+	reconciler := &InventoryReconciler{Core: fake.NewSimpleClientset(class), Logger: slog.Default()}
+	profiles, err := reconciler.profiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("unsupported strategy was advertised: %#v", profiles)
+	}
+}
+
+func TestEnabledButUnadvertisedStrategyRetainsInventoryWithZeroSlots(t *testing.T) {
+	disabled := false
+	secondary := int32(1)
+	profile := model.DeviceClassParameters{Strategy: model.StrategyRouteRepoint, Profile: "carrier", SlotsPerNode: 2, Paths: []model.PathSpec{{
+		Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, ENITagSelector: model.TagSelector{"carrier-path": "a"},
+		Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-a"}}, RouteTableIDs: []string{"rtb-a"},
+	}}}
+	iface := ec2types.NetworkInterface{NetworkInterfaceId: stringptr("eni-a"), SubnetId: stringptr("subnet-a"), SourceDestCheck: &disabled,
+		Attachment: &ec2types.NetworkInterfaceAttachment{DeviceIndex: &secondary}, TagSet: []ec2types.Tag{{Key: stringptr("carrier-path"), Value: stringptr("a")}}}
+	reconciler := &InventoryReconciler{Logger: slog.Default(), EnabledStrategies: map[string]bool{model.StrategyRouteRepoint: true}, AdvertisedStrategies: map[string]bool{}}
+	inventory := reconciler.inventoryForNode("node-a", "i-a", "eu-west-1a", []ec2types.NetworkInterface{iface}, map[string]string{"subnet-a": "10.0.1.0/24"}, map[string]model.DeviceClassParameters{"carrier": profile})
+	if len(inventory.Profiles["carrier"]) != 1 || inventory.SlotsPerNode["carrier"] != 0 {
+		t.Fatalf("reconcile-only profile was not retained with zero advertised slots: %#v", inventory)
+	}
+}
+
+func TestOnPremInventoryUsesAdministratorApprovedParents(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Labels: map[string]string{"dra.anchordra.co/enabled": "true"}}}
+	class := &resourceapi.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "carrier"},
+		Spec: resourceapi.DeviceClassSpec{Config: []resourceapi.DeviceClassConfiguration{{DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{
+			Driver:     constants.DriverName,
+			Parameters: runtime.RawExtension{Raw: []byte(`{"strategy":"l2-announce","profile":"carrier-dual","paths":[{"name":"a","interfaceName":"sigtran-a","routingTable":101,"parentInterface":"carrier0","subnetCidr":"10.50.1.0/24"}]}`)},
+		}}}}},
+	}
+	dynamicClient := testDynamicClient()
+	reconciler := &InventoryReconciler{
+		Core: fake.NewSimpleClientset(node, class), Dynamic: dynamicClient, Platform: "onprem",
+		NodeLabel: "dra.anchordra.co/enabled=true", EnabledStrategies: map[string]bool{model.StrategyL2Announce: true},
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	object, err := dynamicClient.Resource(anchorkube.InventoryGVR).Get(context.Background(), node.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec model.AnchorNodeInventorySpec
+	raw, _, _ := unstructured.NestedMap(object.Object, "spec")
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &spec); err != nil {
+		t.Fatal(err)
+	}
+	path := spec.Profiles["carrier-dual"][0]
+	if path.Interface != "carrier0" || path.SubnetCIDR != "10.50.1.0/24" || path.ENIID != "worker-1/carrier0" {
+		t.Fatalf("unexpected on-prem inventory path: %#v", path)
+	}
+}
+
+func TestControllerRemovesReadinessTaintFromReadyInventory(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+		Key: constants.NotReadyTaintKey, Value: "true", Effect: corev1.TaintEffectNoSchedule,
+	}}}}
+	status := model.AnchorNodeInventoryStatus{Ready: true, ObservedGeneration: 1}
+	rawStatus, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
+	inventory := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": constants.APIGroup + "/" + constants.APIVersion,
+		"kind":       "AnchorNodeInventory", "metadata": map[string]any{"name": node.Name, "generation": int64(1)},
+		"status": rawStatus,
+	}}
+	core := fake.NewSimpleClientset(node)
+	reconciler := &InventoryReconciler{Core: core, Dynamic: testDynamicClient(inventory)}
+	if err := reconciler.syncNodeReadinessTaint(context.Background(), node.Name); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := core.CoreV1().Nodes().Get(context.Background(), node.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Spec.Taints) != 0 {
+		t.Fatalf("ready node still has Anchor taint: %#v", updated.Spec.Taints)
 	}
 }

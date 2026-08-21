@@ -47,3 +47,58 @@ variable "peer_path_b_ip" {
   type    = string
   default = "10.50.2.20"
 }
+
+variable "enable_route_repoint_harness" {
+  type        = bool
+  description = "Provision the disposable two-AZ TGW route-repoint qualification topology."
+  default     = false
+}
+
+variable "route_repoint_az_b" {
+  type    = string
+  default = "eu-west-1b"
+}
+
+variable "route_repoint_kubernetes_subnet_b_id" {
+  type    = string
+  default = null
+}
+
+variable "route_repoint_carrier_subnets_b" {
+  type = object({
+    a = string
+    b = string
+  })
+  default = null
+}
+
+variable "route_repoint_platform_tgw_subnet_cidrs" {
+  type        = map(string)
+  description = "Unused CIDRs in the platform VPC keyed by AZ for disposable TGW attachment subnets."
+  default     = {}
+}
+
+variable "route_repoint_carrier_route_table_ids" {
+  type        = set(string)
+  description = "Route tables associated with carrier subnets; the harness adds the stable peer-VPC return prefix."
+  default     = []
+}
+
+variable "route_repoint_peer_vpc_cidr" {
+  type    = string
+  default = "10.91.0.0/16"
+}
+
+variable "route_repoint_peer_subnet_cidrs" {
+  type = map(string)
+  default = {
+    eu-west-1a = "10.91.1.0/24"
+    eu-west-1b = "10.91.2.0/24"
+  }
+}
+
+variable "route_repoint_carrier_prefix" {
+  type        = string
+  description = "External test prefix routed through TGW; it must not overlap either VPC."
+  default     = "198.51.100.0/24"
+}

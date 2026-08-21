@@ -92,9 +92,9 @@ func TestPlaceBatchUsesTwoDescribeCalls(t *testing.T) {
 		endpoints = append(endpoints, Endpoint{ClaimUID: fmt.Sprintf("uid-%d", i), Path: model.PlacementPath{Name: "a", IP: ip + "/24", ENIID: eniID, SubnetID: subnetID}})
 	}
 	results := strategy.PlaceBatch(context.Background(), endpoints)
-	for _, err := range results {
-		if err != nil {
-			t.Fatal(err)
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatal(result.Err)
 		}
 	}
 	if fake.describes != 2 {

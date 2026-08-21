@@ -26,7 +26,7 @@ func NewClients(kubeconfig string) (*Clients, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build Kubernetes client configuration: %w", err)
 	}
-	config.UserAgent = "anchor/0.1"
+	config.UserAgent = "anchor/0.2"
 	core, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
