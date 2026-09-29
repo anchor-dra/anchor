@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p .work/go-build-cache
+mkdir -p .work
 bash -n scripts/*.sh hack/e2e/*.sh
-GOCACHE=${GOCACHE:-$PWD/.work/go-build-cache} go test -race ./...
-GOCACHE=${GOCACHE:-$PWD/.work/go-build-cache} go vet ./...
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
+go test -race ./...
+go vet ./...
 helm lint charts/anchor --set aws.region=eu-west-1
 helm template anchor charts/anchor --namespace anchor-system \
   --kube-version 1.34.0 \
