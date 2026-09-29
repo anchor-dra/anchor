@@ -47,6 +47,10 @@ node:
   networkReconcileInterval: 30s
   planGCInterval: 5m
   protectHostPaths: true
+  # Host-path access only; these identities cannot bypass the required NRI plugin.
+  hostPathAllowedServiceAccounts: []
+  # - namespace: observability
+  #   name: metrics-node-exporter
   resources:
     requests:
       cpu: 25m
