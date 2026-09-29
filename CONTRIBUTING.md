@@ -13,8 +13,9 @@ before the first public release.
 2. Use conventional commits: `fix:`/`perf:` selects a patch release, `feat:` a
    minor release, and a breaking-change marker a major release. CI calculates the
    version from commits since the latest stable tag; metadata does not override it.
-3. Merge the validated pull request into `develop`. CI validates again and
-   publishes the image, chart and GitHub prerelease as `X.Y.Z-rc.N`.
+3. Merge the validated pull request into `develop`. CI reuses successful PR
+   validation for an identical tree (or runs full checks if evidence is missing
+   or differs), then publishes the image, chart and GitHub prerelease as `X.Y.Z-rc.N`.
 4. After successful RC publication, open a `develop` to `main` pull request.
    Preserve the RC's complete file tree; the stable release gate rejects any
    different content. Do not make a separate version-bump commit on `main`.
@@ -46,3 +47,19 @@ before the first public release.
 
 Local pre-commit hooks are not required. `scripts/check.sh` remains the complete
 local validation entry point, including promotion-gate tests.
+
+## Validation reuse
+
+After a PR to `develop` passes the checks and image build, CI uploads evidence
+containing the actual checkout commit/tree, PR head, run ID and attempt number.
+On a develop push, CI finds the merged PR and its successful run of this workflow,
+checks the evidence against GitHub's commit tree and the current merged tree, and
+skips the full suite only when all fields match. The complete tree includes the
+workflow and check scripts, not just application source files.
+
+Missing or expired evidence (retained for 14 days), an API error, a changed merge
+result, a different run attempt, or a direct push triggers full validation.
+Release publication still requires the validation job to succeed. PRs to main and
+main pushes use the published-RC gate instead; they never run `check.sh`. Open the
+main promotion PR after RC publication completes, or rerun its check afterward.
+Tags do not trigger this workflow.

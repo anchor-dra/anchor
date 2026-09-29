@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,8 +36,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/verify-promotion.py
+      - name: Find successful PR validation for the merged tree
+        id: pr-validation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/pr-validation.py reuse
       - uses: actions/setup-go@v5
-        if: steps.mode.outputs.promotion != 'true'
+        if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         with:
           go-version-file: go.mod
           cache: true
@@ -45,26 +52,26 @@ jobs:
             go.sum
             scripts/check.sh
       - uses: azure/setup-helm@v4
-        if: steps.mode.outputs.promotion != 'true'
+        if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         with:
           version: v3.17.3
       - uses: hashicorp/setup-terraform@v3
-        if: steps.mode.outputs.promotion != 'true'
+        if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         with:
           terraform_version: 1.11.4
       - name: Configure Terraform provider cache
-        if: steps.mode.outputs.promotion != 'true'
+        if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         run: |
           mkdir -p "$HOME/.terraform.d/plugin-cache"
           echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
-        if: steps.mode.outputs.promotion != 'true'
+        if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         with:
           path: ~/.terraform.d/plugin-cache
           key: ${{ runner.os }}-${{ runner.arch }}-terraform-1.11.4-${{ hashFiles('hack/e2e/aws/.terraform.lock.hcl') }}
-      - if: steps.mode.outputs.promotion != 'true'
+      - if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         run: terraform -chdir=hack/e2e/aws init -backend=false -lockfile=readonly
-      - if: steps.mode.outputs.promotion != 'true'
+      - if: steps.mode.outputs.promotion != 'true' && steps.pr-validation.outputs.reuse != 'true'
         run: ./scripts/check.sh
       - uses: docker/setup-buildx-action@v3
         if: github.event_name == 'pull_request' && steps.mode.outputs.promotion != 'true'
@@ -77,6 +84,19 @@ jobs:
           build-args: VERSION=ci
           push: false
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+      - name: Record successful PR validation
+        if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+        run: python3 scripts/pr-validation.py record
+      - name: Upload validation evidence
+        if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-validation-evidence
+          path: .work/pr-validation.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
+
 
   release:
     name: Publish semantic release
