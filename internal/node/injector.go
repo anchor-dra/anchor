@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -119,13 +120,13 @@ func (linuxPathOps) InjectPath(ctx context.Context, plan PodNetworkPlan, path mo
 			return err
 		}
 		if err := configurePath(link, path); err != nil {
-			_ = netlink.LinkDel(link)
-			return err
+			cleanupErr := deletePathPolicyRules(path)
+			return errors.Join(err, cleanupErr, netlink.LinkDel(link))
 		}
 		if plan.Strategy == model.StrategyL2Announce {
 			if err := announceIPv4(link, path.IP); err != nil {
-				_ = netlink.LinkDel(link)
-				return fmt.Errorf("announce address %s on %s: %w", path.IP, path.InterfaceName, err)
+				cleanupErr := deletePathPolicyRules(path)
+				return errors.Join(fmt.Errorf("announce address %s on %s: %w", path.IP, path.InterfaceName, err), cleanupErr, netlink.LinkDel(link))
 			}
 		}
 		return nil
@@ -189,8 +190,6 @@ func configurePath(link netlink.Link, path model.PlacementPath) error {
 		return fmt.Errorf("bring interface up: %w", err)
 	}
 
-	prefix, _ := netip.ParsePrefix(path.IP)
-	source := &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(32, 32)}
 	connected, _ := netlink.ParseIPNet(path.SubnetCIDR)
 	if connected != nil {
 		if err := netlink.RouteReplace(&netlink.Route{LinkIndex: link.Attrs().Index, Dst: connected, Scope: netlink.SCOPE_LINK, Table: path.RoutingTable}); err != nil {
@@ -214,12 +213,10 @@ func configurePath(link netlink.Link, path model.PlacementPath) error {
 			return fmt.Errorf("configure route %s: %w", destination, err)
 		}
 	}
-	rule := netlink.NewRule()
-	rule.Src = source
-	rule.Table = path.RoutingTable
-	rule.Priority = 10000 + path.RoutingTable
-	if err := replaceRule(rule); err != nil {
-		return fmt.Errorf("configure source rule: %w", err)
+	for _, rule := range pathPolicyRules(path) {
+		if err := replaceRule(rule); err != nil {
+			return fmt.Errorf("configure policy rule: %w", err)
+		}
 	}
 	return nil
 }
@@ -229,10 +226,18 @@ func replaceRule(desired *netlink.Rule) error {
 	if err != nil {
 		return err
 	}
+	found := false
 	for _, rule := range rules {
-		if rule.Table == desired.Table && rule.Priority == desired.Priority && ipNetEqual(rule.Src, desired.Src) {
-			return nil
+		if samePolicyRule(rule, *desired) {
+			found = true
+			continue
 		}
+		if conflictingPolicyRule(rule, *desired) {
+			return fmt.Errorf("existing policy rule %s conflicts with %s", rule.String(), desired)
+		}
+	}
+	if found {
+		return nil
 	}
 	return netlink.RuleAdd(desired)
 }
@@ -284,18 +289,26 @@ func verifyPath(link netlink.Link, path model.PlacementPath) error {
 			return fmt.Errorf("interface %q is missing route %s via %s in table %d", path.InterfaceName, destination, path.Gateway, path.RoutingTable)
 		}
 	}
-	prefix, _ := netip.ParsePrefix(path.IP)
-	source := &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(32, 32)}
 	rules, err := netlink.RuleList(netlink.FAMILY_V4)
 	if err != nil {
 		return err
 	}
-	for _, rule := range rules {
-		if rule.Table == path.RoutingTable && rule.Priority == 10000+path.RoutingTable && ipNetEqual(rule.Src, source) {
-			return nil
+	for _, desired := range pathPolicyRules(path) {
+		found := false
+		for _, actual := range rules {
+			if samePolicyRule(actual, *desired) {
+				found = true
+				continue
+			}
+			if conflictingPolicyRule(actual, *desired) {
+				return fmt.Errorf("interface %q has a conflicting policy rule %s", path.InterfaceName, actual.String())
+			}
+		}
+		if !found {
+			return fmt.Errorf("interface %q is missing policy rule %s", path.InterfaceName, desired)
 		}
 	}
-	return fmt.Errorf("interface %q is missing source rule for table %d", path.InterfaceName, path.RoutingTable)
+	return nil
 }
 
 func hasRoute(routes []netlink.Route, destination *net.IPNet, gateway net.IP) bool {
@@ -356,9 +369,18 @@ func (linuxPathOps) DeletePath(ctx context.Context, path model.PlacementPath, na
 		return err
 	}
 	return withNetNS(namespace.Path, func() error {
+		// Policy rules survive LinkDel. Remove only rules belonging to this plan,
+		// even if the interface was already removed during failed injection.
+		if err := deletePathPolicyRules(path); err != nil {
+			return err
+		}
 		link, err := netlink.LinkByName(path.InterfaceName)
 		if err != nil {
-			return nil
+			var missing netlink.LinkNotFoundError
+			if errors.As(err, &missing) {
+				return nil
+			}
+			return err
 		}
 		return netlink.LinkDel(link)
 	})
@@ -371,10 +393,10 @@ func validatePlacementPath(path model.PlacementPath) error {
 	if path.RoutingTable < 1 || path.RoutingTable > 252 {
 		return fmt.Errorf("path %q has invalid routing table %d", path.Name, path.RoutingTable)
 	}
-	if _, err := netip.ParsePrefix(path.IP); err != nil {
-		return fmt.Errorf("path %q has invalid address: %w", path.Name, err)
+	if prefix, err := netip.ParsePrefix(path.IP); err != nil || !prefix.Addr().Is4() {
+		return fmt.Errorf("path %q has invalid IPv4 address %q", path.Name, path.IP)
 	}
-	return nil
+	return model.ValidatePreferredDestinations([]model.PathSpec{{Name: path.Name, Routes: path.Routes, PreferredDestinations: path.PreferredDestinations}})
 }
 
 func temporaryLinkName(claimUID, path string) string {
@@ -426,4 +448,63 @@ func ipNetEqual(left, right *net.IPNet) bool {
 		return left == nil && right == nil
 	}
 	return left.IP.Equal(right.IP) && left.Mask.String() == right.Mask.String()
+}
+
+// Source rules always win; destination preferences only guide an initial lookup
+// without a matching carrier source. Both ranges precede Linux's main table.
+func pathPolicyRules(path model.PlacementPath) []*netlink.Rule {
+	prefix := netip.MustParsePrefix(path.IP)
+	source := netlink.NewRule()
+	source.Family = netlink.FAMILY_V4
+	source.Src = &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(32, 32)}
+	source.Priority = 10000 + path.RoutingTable
+	source.Table = path.RoutingTable
+	rules := []*netlink.Rule{source}
+	for _, value := range path.PreferredDestinations {
+		rule := netlink.NewRule()
+		rule.Family = netlink.FAMILY_V4
+		rule.Dst, _ = netlink.ParseIPNet(value)
+		rule.Priority = 20000 + path.RoutingTable
+		rule.Table = path.RoutingTable
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+func samePolicyRule(actual, desired netlink.Rule) bool {
+	if !ipNetEqual(actual.Src, desired.Src) || !ipNetEqual(actual.Dst, desired.Dst) {
+		return false
+	}
+	actual.Src, actual.Dst, desired.Src, desired.Dst = nil, nil, nil, nil
+	// Family was implicit in older source-rule writes. Kernel dumps set AF_INET.
+	if desired.Family == 0 {
+		desired.Family = netlink.FAMILY_V4
+	}
+	return reflect.DeepEqual(actual, desired)
+}
+
+func conflictingPolicyRule(actual, desired netlink.Rule) bool {
+	// Equal-priority overlapping destinations must not silently shadow the
+	// requested lookup. Rules with other selectors (e.g. marks) remain separate.
+	overlaps := actual.Dst == nil || desired.Dst == nil || actual.Dst.Contains(desired.Dst.IP) || desired.Dst.Contains(actual.Dst.IP)
+	actual.Table, actual.Dst = desired.Table, desired.Dst
+	return overlaps && samePolicyRule(actual, desired)
+}
+
+func deletePathPolicyRules(path model.PlacementPath) error {
+	rules, err := netlink.RuleList(netlink.FAMILY_V4)
+	if err != nil {
+		return err
+	}
+	for _, actual := range rules {
+		for _, desired := range pathPolicyRules(path) {
+			if samePolicyRule(actual, *desired) {
+				if err := netlink.RuleDel(&actual); err != nil && !errors.Is(err, unix.ENOENT) {
+					return err
+				}
+				break
+			}
+		}
+	}
+	return nil
 }

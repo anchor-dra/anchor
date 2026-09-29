@@ -2,6 +2,45 @@ package model
 
 import "testing"
 
+func TestPreferredDestinations(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		a, b  []string
+		valid bool
+	}{
+		{"omitted", nil, nil, true},
+		{"remote subnets", []string{"192.0.2.0/25"}, []string{"192.0.2.128/25"}, true},
+		{"remote host", []string{"192.0.2.7/32"}, nil, true},
+		{"IPv6", []string{"2001:db8::/64"}, nil, false},
+		{"noncanonical", []string{"192.0.2.7/24"}, nil, false},
+		{"unrouted", []string{"198.51.100.0/24"}, nil, false},
+		{"duplicate", []string{"192.0.2.0/25", "192.0.2.0/25"}, nil, false},
+		{"nested same path", []string{"192.0.2.0/24", "192.0.2.0/25"}, nil, false},
+		{"overlap across paths", []string{"192.0.2.0/24"}, []string{"192.0.2.128/25"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validClass()
+			for i := range c.Paths {
+				c.Paths[i].Gateway = "10.0.1.1"
+				c.Paths[i].Routes = []string{"192.0.2.0/24"}
+			}
+			c.Paths[0].PreferredDestinations, c.Paths[1].PreferredDestinations = tc.a, tc.b
+			if err := c.NormalizeAndValidate(); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestPlacementPreservesPreferredDestinations(t *testing.T) {
+	spec := PathSpec{Name: "a", PreferredDestinations: []string{"192.0.2.0/24"}}
+	path := BuildPlacementPath(AddressSpec{Path: "a", IP: "10.0.1.10/32"}, ENIPath{Name: "a"}, spec)
+	spec.PreferredDestinations[0] = "198.51.100.0/24"
+	if len(path.PreferredDestinations) != 1 || path.PreferredDestinations[0] != "192.0.2.0/24" {
+		t.Fatalf("preference missing or aliased: %+v", path)
+	}
+}
+
 func validClass() DeviceClassParameters {
 	return DeviceClassParameters{
 		Strategy: StrategyIPReassign, Profile: "carrier-dual",

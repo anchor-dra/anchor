@@ -29,18 +29,19 @@ type AnchorNodeInventoryStatus struct {
 }
 
 type PlacementPath struct {
-	Name          string   `json:"name"`
-	InterfaceName string   `json:"interfaceName"`
-	RoutingTable  int      `json:"routingTable"`
-	IP            string   `json:"ip"`
-	ENIID         string   `json:"eniId"`
-	ParentMAC     string   `json:"parentMAC"`
-	Interface     string   `json:"interface"`
-	SubnetID      string   `json:"subnetId"`
-	SubnetCIDR    string   `json:"subnetCidr"`
-	Gateway       string   `json:"gateway,omitempty"`
-	Routes        []string `json:"routes,omitempty"`
-	RouteTableIDs []string `json:"routeTableIds,omitempty"`
+	Name                  string   `json:"name"`
+	InterfaceName         string   `json:"interfaceName"`
+	RoutingTable          int      `json:"routingTable"`
+	IP                    string   `json:"ip"`
+	ENIID                 string   `json:"eniId"`
+	ParentMAC             string   `json:"parentMAC"`
+	Interface             string   `json:"interface"`
+	SubnetID              string   `json:"subnetId"`
+	SubnetCIDR            string   `json:"subnetCidr"`
+	Gateway               string   `json:"gateway,omitempty"`
+	Routes                []string `json:"routes,omitempty"`
+	PreferredDestinations []string `json:"preferredDestinations,omitempty"`
+	RouteTableIDs         []string `json:"routeTableIds,omitempty"`
 }
 
 // BuildPlacementPath combines tenant addressing with an inventoried ENI and
@@ -56,7 +57,8 @@ func BuildPlacementPath(address AddressSpec, path ENIPath, configured PathSpec) 
 		IP: address.IP, ENIID: path.ENIID, ParentMAC: path.MAC, Interface: path.Interface,
 		SubnetID: path.SubnetID, SubnetCIDR: path.SubnetCIDR,
 		Gateway: gateway, Routes: append([]string(nil), configured.Routes...),
-		RouteTableIDs: append([]string(nil), configured.RouteTableIDs...),
+		PreferredDestinations: append([]string(nil), configured.PreferredDestinations...),
+		RouteTableIDs:         append([]string(nil), configured.RouteTableIDs...),
 	}
 }
 
