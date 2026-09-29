@@ -30,6 +30,10 @@ before the first public release.
   `GOCACHE`, so `setup-go` restores the cache actually used by tests and vet.
 - Terraform provider downloads are cached by OS, architecture, Terraform version
   and the committed lockfile. Initialization uses `-lockfile=readonly`.
+  When updating providers, record checksums for both CI and local development:
+  `terraform -chdir=hack/e2e/aws providers lock -platform=linux_amd64 -platform=darwin_arm64`.
+  Linux's unpacked-package checksum must be committed; archive checksums alone
+  are insufficient for subsequent validation with read-only initialization.
 - Pull requests to develop validate the image without pushing it. Develop/main
   publish one image per release; the validation job does not build a second one.
 - Docker uses the GHCR `buildcache` tag with intermediate layers (`mode=max`),
