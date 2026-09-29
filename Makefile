@@ -1,6 +1,6 @@
 .PHONY: build test test-race vet check helm image
 
-VERSION ?= 0.2.2
+VERSION ?= 0.2.3
 IMAGE ?= anchor:$(VERSION)
 
 build:
