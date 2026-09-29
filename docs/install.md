@@ -97,9 +97,25 @@ Stock EKS AL2023 with containerd 2.2.5 is supported by Anchor's runtime
 selection and uses `CreateContainer`; it does not require the sandbox rollback
 fix. Before production rollout, qualify the selected AMI's exact package plus
 `nodeadm`, required-plugin enforcement, primary-CNI ordering, and cold restart
-behavior. The current Iris AWS platform is self-managed Kubespray on EC2, so
-the staging run in this repository qualifies the runtime workaround but does
-not replace that EKS-specific integration run.
+behavior. The self-managed EC2 staging run in this repository qualifies the
+runtime workaround. The separate EKS infrastructure baseline has also been
+deployed, but its recorded checks do not qualify Anchor's EKS dataplane. See
+[EKS integration and qualification](eks.md) for the evidence boundary and
+remaining tests.
+
+Approved infrastructure agents that need protected host paths can be listed
+explicitly in the 0.2.1 chart:
+
+```yaml
+node:
+  hostPathAllowedServiceAccounts:
+    - namespace: observability
+      name: metrics-node-exporter
+```
+
+The default list is empty. Each entry requires both namespace and service-account
+name. This exception grants hostPath access only; the required NRI plugin bypass
+remains restricted to Anchor's own node service account.
 
 After provisioning, verify on a candidate node that an ordinary pod cannot
 start while the Anchor node plugin is stopped.

@@ -93,6 +93,14 @@ as the primary CNI, and two independently routed SCTP paths. Cilium is expected
 to follow the same extra-ENI model. VPC CNI requires carrier-ENI exclusion and
 is not yet part of the `0.2` conformance run.
 
+EKS integration is implemented for AL2023 managed node groups, using IRSA,
+`nodeadm` NRI configuration and externally provisioned carrier ENIs. The
+2026-09-14 EKS staging baseline verified the cluster, managed add-ons and
+application delivery; Anchor and carrier workers were still pending in that
+record. Anchor 0.2.1 supplies the configurable hostPath exception needed by
+approved exporters. It does not establish EKS dataplane qualification. See
+[EKS integration and qualification](docs/eks.md) for the remaining checks.
+
 ## Install
 
 Choose the controller identity first:
@@ -178,6 +186,7 @@ upgrade, endpoint-retirement, disaster-recovery, and security procedures.
 | [Installation and upgrade](docs/install.md) | Operator procedures and lifecycle safety |
 | [IAM](docs/iam.md) | Least-privilege policy, instance profiles, and EKS IRSA |
 | [AWS staging e2e](docs/e2e-aws.md) | Maintainer qualification and evidence checklist |
+| [EKS integration](docs/eks.md) | Managed-node requirements and EKS qualification status |
 | [Release process](docs/releasing.md) | RC/stable workflow and published artifacts |
 | [Contributing](CONTRIBUTING.md) | Development and contribution workflow |
 | [Security](SECURITY.md) | Reporting vulnerabilities |
