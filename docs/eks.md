@@ -24,6 +24,24 @@ Ready workers and the application namespace services, but no Anchor Helm
 release, Deployment or DaemonSet, and no DeviceClasses or ResourceClaims.
 EKS qualification remains pending on that cluster.
 
+### Subsequent live carrier tests — 2026-09-29
+
+Anchor 0.2.1 was subsequently installed on the Ireland and London AL2023 EKS
+1.35.7 clusters with containerd 2.2.5. DRA allocation, NRI interface injection,
+IRSA route updates and actual inter-region SCTP/Diameter associations were observed.
+Graceful Authenticator relocation retained the claim and endpoint addresses and
+restored readiness in 41.71 seconds. All endpoint routes converged on new ENIs.
+
+This remains a partial qualification: dropping one remote AAA address lost the
+association; restoration reconnected automatically. Co-locating AAA and HSS on one
+worker also prevented the AAA HSS connection/listener startup; separating them
+restored traffic. The testtool 1.0.2 listeners additionally needed local candidate
+fixes to bind both configured addresses. These findings prevent a blanket
+production/failover qualification claim. Abrupt node loss, managed-node replacement,
+NRI bypass/exporter admission and AZ/region loss were not qualified by this run.
+The EKS infrastructure repo records the dated report and raw evidence under
+`docs/qualification/2026-09-29-ireland-london.md`.
+
 The 0.2.1 chart adds `node.hostPathAllowedServiceAccounts` so approved exporters
 can coexist with Anchor's hostPath admission policy. This is configurable on
 both EKS and self-managed clusters; it does not exempt those exporters from

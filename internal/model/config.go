@@ -22,17 +22,18 @@ type AWSSubnetSpec struct {
 }
 
 type PathSpec struct {
-	Name            string          `json:"name" yaml:"name"`
-	InterfaceName   string          `json:"interfaceName" yaml:"interfaceName"`
-	RoutingTable    int             `json:"routingTable" yaml:"routingTable"`
-	SubnetID        string          `json:"subnetId" yaml:"subnetId"`
-	SubnetCIDR      string          `json:"subnetCidr,omitempty" yaml:"subnetCidr,omitempty"`
-	ParentInterface string          `json:"parentInterface,omitempty" yaml:"parentInterface,omitempty"`
-	ENITagSelector  TagSelector     `json:"eniTagSelector" yaml:"eniTagSelector"`
-	Subnets         []AWSSubnetSpec `json:"subnets,omitempty" yaml:"subnets,omitempty"`
-	RouteTableIDs   []string        `json:"routeTableIds,omitempty" yaml:"routeTableIds,omitempty"`
-	Gateway         string          `json:"gateway,omitempty" yaml:"gateway,omitempty"`
-	Routes          []string        `json:"routes,omitempty" yaml:"routes,omitempty"`
+	Name                  string          `json:"name" yaml:"name"`
+	InterfaceName         string          `json:"interfaceName" yaml:"interfaceName"`
+	RoutingTable          int             `json:"routingTable" yaml:"routingTable"`
+	SubnetID              string          `json:"subnetId" yaml:"subnetId"`
+	SubnetCIDR            string          `json:"subnetCidr,omitempty" yaml:"subnetCidr,omitempty"`
+	ParentInterface       string          `json:"parentInterface,omitempty" yaml:"parentInterface,omitempty"`
+	ENITagSelector        TagSelector     `json:"eniTagSelector" yaml:"eniTagSelector"`
+	Subnets               []AWSSubnetSpec `json:"subnets,omitempty" yaml:"subnets,omitempty"`
+	RouteTableIDs         []string        `json:"routeTableIds,omitempty" yaml:"routeTableIds,omitempty"`
+	Gateway               string          `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	Routes                []string        `json:"routes,omitempty" yaml:"routes,omitempty"`
+	PreferredDestinations []string        `json:"preferredDestinations,omitempty" yaml:"preferredDestinations,omitempty"`
 }
 
 type DeviceClassParameters struct {
@@ -63,6 +64,9 @@ func Decode[T any](raw []byte) (T, error) {
 }
 
 func (p *DeviceClassParameters) NormalizeAndValidate() error {
+	if err := ValidatePreferredDestinations(p.Paths); err != nil {
+		return err
+	}
 	if p.Strategy == "" {
 		return fmt.Errorf("strategy is required")
 	}
@@ -316,4 +320,40 @@ func SafeName(parts ...string) string {
 		}
 	}
 	return strings.Trim(out.String(), "-")
+}
+
+// ValidatePreferredDestinations keeps initial source selection explicit. Preferences
+// must be routable in their path table and cannot overlap (including duplicates).
+// Empty preferences preserve the existing source-only routing behavior.
+func ValidatePreferredDestinations(paths []PathSpec) error {
+	type preference struct {
+		prefix netip.Prefix
+		path   string
+	}
+	var seen []preference
+	for _, path := range paths {
+		for _, value := range path.PreferredDestinations {
+			prefix, err := netip.ParsePrefix(value)
+			if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+				return fmt.Errorf("path %q has invalid canonical IPv4 preferred destination %q", path.Name, value)
+			}
+			covered := false
+			for _, route := range path.Routes {
+				network, err := netip.ParsePrefix(route)
+				if err == nil && network.Addr().Is4() && network == network.Masked() && network.Bits() <= prefix.Bits() && network.Contains(prefix.Addr()) {
+					covered = true
+				}
+			}
+			if !covered {
+				return fmt.Errorf("path %q preferred destination %q is not covered by its routes", path.Name, value)
+			}
+			for _, previous := range seen {
+				if prefix.Overlaps(previous.prefix) {
+					return fmt.Errorf("path %q preferred destination %q overlaps %s on path %q", path.Name, value, previous.prefix, previous.path)
+				}
+			}
+			seen = append(seen, preference{prefix, path.Name})
+		}
+	}
+	return nil
 }

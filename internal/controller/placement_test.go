@@ -671,14 +671,21 @@ func TestDeviceClassComparisonTreatsTopologySetsAsUnordered(t *testing.T) {
 		{Name: "b", InterfaceName: "sigtran-b", RoutingTable: 102, ENITagSelector: model.TagSelector{"path": "b"}, Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-b"}, {SubnetID: "subnet-a"}}, RouteTableIDs: []string{"rtb-b", "rtb-a"}, Routes: []string{"10.2.0.0/16", "10.1.0.0/16"}},
 		{Name: "a", InterfaceName: "sigtran-a", RoutingTable: 101, ENITagSelector: model.TagSelector{"path": "a"}, Subnets: []model.AWSSubnetSpec{{SubnetID: "subnet-a"}}, RouteTableIDs: []string{"rtb-a"}},
 	}}
+	left.Paths[0].PreferredDestinations = []string{"10.1.0.0/16", "10.2.0.0/16"}
 	right := left
 	right.Paths = []model.PathSpec{left.Paths[1], left.Paths[0]}
 	right.Paths[1].Subnets = []model.AWSSubnetSpec{{SubnetID: "subnet-a"}, {SubnetID: "subnet-b"}}
 	right.Paths[1].RouteTableIDs = []string{"rtb-a", "rtb-b"}
 	right.Paths[1].Routes = []string{"10.1.0.0/16", "10.2.0.0/16"}
+	right.Paths[1].PreferredDestinations = []string{"10.2.0.0/16", "10.1.0.0/16"}
 	if !deviceClassEquivalent(left, right) {
 		t.Fatal("semantically identical DeviceClasses were reported as stale")
 	}
+	right.Paths[1].PreferredDestinations = []string{"10.3.0.0/16"}
+	if deviceClassEquivalent(left, right) {
+		t.Fatal("preference change was ignored")
+	}
+	right.Paths[1].PreferredDestinations = left.Paths[0].PreferredDestinations
 	right.Paths[0].RoutingTable++
 	if deviceClassEquivalent(left, right) {
 		t.Fatal("material DeviceClass change was ignored")
