@@ -27,8 +27,13 @@ spec:
             v.hostPath.path == '/run/nri' || v.hostPath.path.startsWith('/run/nri/') ||
             v.hostPath.path == '/var/lib/anchor' || v.hostPath.path.startsWith('/var/lib/anchor/')) ||
           (object.metadata.namespace == {{ .Release.Namespace | quote }} &&
-           object.spec.serviceAccountName == {{ printf "%s-node" (include "anchor.fullname" .) | quote }}))
-      message: Only the Anchor node service account may mount the NRI socket, network namespace, or Anchor state paths.
+           object.spec.serviceAccountName == {{ printf "%s-node" (include "anchor.fullname" .) | quote }})
+          {{- range .Values.node.hostPathAllowedServiceAccounts }}
+          || (object.metadata.namespace == {{ required "hostPathAllowedServiceAccounts.namespace is required" .namespace | quote }} &&
+              object.spec.serviceAccountName == {{ required "hostPathAllowedServiceAccounts.name is required" .name | quote }})
+          {{- end }}
+        )
+      message: Only Anchor and explicitly approved service accounts may mount protected host paths.
     - expression: >-
         !has(object.metadata.annotations) ||
         !({{ "dra.anchordra.co/tolerate-missing-nri-plugin" | quote }} in object.metadata.annotations) ||
