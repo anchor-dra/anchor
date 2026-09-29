@@ -2,8 +2,8 @@ apiVersion: v2
 name: anchor
 description: Anchor DRA driver for static AWS endpoints
 type: application
-version: 0.2.2
-appVersion: 0.2.2
+version: 0.2.3
+appVersion: 0.2.3
 kubeVersion: ">=1.34.0-0"
 home: https://anchordra.co
 sources:
