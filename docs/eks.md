@@ -19,6 +19,11 @@ delivery on EKS does not exercise Anchor's DRA, NRI or SCTP paths. The selected
 AMI and VPC CNI combination therefore remain **pending Anchor qualification**.
 The self-managed EC2 runtime checks do not supply that missing EKS evidence.
 
+A read-only check of the same EKS staging cluster on 2026-09-29 confirmed three
+Ready workers and the application namespace services, but no Anchor Helm
+release, Deployment or DaemonSet, and no DeviceClasses or ResourceClaims.
+EKS qualification remains pending on that cluster.
+
 The 0.2.1 chart adds `node.hostPathAllowedServiceAccounts` so approved exporters
 can coexist with Anchor's hostPath admission policy. This is configurable on
 both EKS and self-managed clusters; it does not exempt those exporters from
