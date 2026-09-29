@@ -98,8 +98,10 @@ EKS integration is implemented for AL2023 managed node groups, using IRSA,
 2026-09-14 EKS staging baseline verified the cluster, managed add-ons and
 application delivery; Anchor and carrier workers were still pending in that
 record. Anchor 0.2.1 supplies the configurable hostPath exception needed by
-approved exporters. It does not establish EKS dataplane qualification. See
-[EKS integration and qualification](docs/eks.md) for the remaining checks.
+approved exporters. Subsequent Ireland–London tests established DRA/NRI injection, inter-region SCTP
+and graceful endpoint relocation, but exposed path-loss and co-located-peer failures.
+EKS failover qualification remains incomplete. See
+[EKS integration and qualification](docs/eks.md) for the evidence and remaining checks.
 
 ## Install
 
@@ -113,7 +115,7 @@ Kubespray cluster using a control-plane instance profile:
 
 ```bash
 helm upgrade --install anchor oci://ghcr.io/anchor-dra/charts/anchor \
-  --version 0.2.0 \
+  --version 0.2.2 \
   --namespace anchor-system --create-namespace \
   --set aws.region=eu-west-1 \
   --set aws.useInstanceProfile=true \
@@ -213,3 +215,9 @@ behavior.
 - Helm chart: `oci://ghcr.io/anchor-dra/charts/anchor`
 
 Anchor is licensed under the [Apache License 2.0](LICENSE).
+
+## Optional remote-subnet preferences (0.2.2)
+
+DeviceClass paths support optional `preferredDestinations` for initial carrier
+source selection. Empty preferences preserve existing behavior. See
+[configuration, lifecycle and release requirements](docs/routing-preferences.md).

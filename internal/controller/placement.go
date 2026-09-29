@@ -148,9 +148,11 @@ func deviceClassEquivalent(left, right model.DeviceClassParameters) bool {
 			path.Subnets = append([]model.AWSSubnetSpec(nil), path.Subnets...)
 			path.RouteTableIDs = append([]string(nil), path.RouteTableIDs...)
 			path.Routes = append([]string(nil), path.Routes...)
+			path.PreferredDestinations = append([]string(nil), path.PreferredDestinations...)
 			sort.Slice(path.Subnets, func(i, j int) bool { return path.Subnets[i].SubnetID < path.Subnets[j].SubnetID })
 			sort.Strings(path.RouteTableIDs)
 			sort.Strings(path.Routes)
+			sort.Strings(path.PreferredDestinations)
 		}
 		sort.Slice(value.Paths, func(i, j int) bool { return value.Paths[i].Name < value.Paths[j].Name })
 		return value
